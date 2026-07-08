@@ -1,0 +1,31 @@
+{
+  "elements": [
+    {
+      "type": "ValidationTextBox",
+      "name": "BaseUrl",
+      "caption": "Base URL"
+    },
+    {
+      "type": "ValidationTextBox",
+      "name": "ClientId",
+      "caption": "OAuth Client ID"
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "PollInterval",
+      "caption": "Poll Interval (seconds)",
+      "minimum": 60
+    },
+    {
+      "type": "CheckBox",
+      "name": "DebugPayloads",
+      "caption": "Enable debug payload variable"
+    }
+  ],
+  "actions": [
+    {
+      "type": "Label",
+      "caption": "REST behavior is scaffolded only. OAuth exchange, polling and commands are implemented in later SAEF steps."
+    }
+  ]
+}

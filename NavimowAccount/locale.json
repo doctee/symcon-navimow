@@ -1,0 +1,12 @@
+{
+  "translations": {
+    "de": {
+      "Navimow Account": "Navimow Konto",
+      "Base URL": "Basis-URL",
+      "OAuth Client ID": "OAuth Client-ID",
+      "Poll Interval (seconds)": "Abfrageintervall (Sekunden)",
+      "Enable debug payload variable": "Debug-Payload-Variable aktivieren",
+      "REST behavior is scaffolded only. OAuth exchange, polling and commands are implemented in later SAEF steps.": "Das REST-Verhalten ist nur vorbereitet. OAuth-Austausch, Abfrage und Befehle werden in spaeteren SAEF-Schritten implementiert."
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "translations": {
+    "de": {
+      "Navimow Device": "Navimow Geraet",
+      "Device ID": "Geraete-ID",
+      "Display Name": "Anzeigename",
+      "Enable debug payload variable": "Debug-Payload-Variable aktivieren",
+      "Device state and command actions are scaffolded only. Live commands are not implemented in this step.": "Geraetezustand und Befehlsaktionen sind nur vorbereitet. Live-Befehle sind in diesem Schritt nicht implementiert."
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "translations": {
+    "de": {
+      "Navimow Configurator": "Navimow Konfigurator",
+      "Discovery UI is scaffolded only. It will read sanitized account discovery data in a later SAEF step.": "Die Discovery-Oberflaeche ist nur vorbereitet. Sie liest in einem spaeteren SAEF-Schritt bereinigte Konto-Discovery-Daten."
+    }
+  }
+}

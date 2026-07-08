@@ -1,0 +1,25 @@
+{
+  "elements": [
+    {
+      "type": "ValidationTextBox",
+      "name": "DeviceId",
+      "caption": "Device ID"
+    },
+    {
+      "type": "ValidationTextBox",
+      "name": "DisplayName",
+      "caption": "Display Name"
+    },
+    {
+      "type": "CheckBox",
+      "name": "DebugPayloads",
+      "caption": "Enable debug payload variable"
+    }
+  ],
+  "actions": [
+    {
+      "type": "Label",
+      "caption": "Device state and command actions are scaffolded only. Live commands are not implemented in this step."
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "elements": [],
+  "actions": [
+    {
+      "type": "Label",
+      "caption": "Discovery UI is scaffolded only. It will read sanitized account discovery data in a later SAEF step."
+    }
+  ]
+}
