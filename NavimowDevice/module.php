@@ -8,6 +8,8 @@ class NavimowDevice extends IPSModule
 {
     private const DATA_INTERFACE = '{54620029-127D-470D-97C7-44265496FAA0}';
     private const MESSAGE_SCHEMA_VERSION = 1;
+    private const VEHICLE_STATE_DOCKED = 2;
+    private const VEHICLE_STATE_DOCKING = 5;
     private const VEHICLE_STATE_OFFLINE = 11;
     private const MAX_DEBUG_JSON_BYTES = 16384;
     private const COMMAND_DOCK = 6;
@@ -19,6 +21,15 @@ class NavimowDevice extends IPSModule
     private const COMMAND_RESULT_FAILED = 7;
     private const COMMAND_RESULT_VERIFICATION_TIMEOUT = 8;
     private const COMMAND_VERIFICATION_DELAY_MILLISECONDS = 5000;
+    private const COMMAND_VERIFICATION_POLL_MILLISECONDS = 60000;
+    private const COMMAND_VERIFICATION_TIMEOUT_SECONDS = 900;
+    private const COMMAND_STATE_IDLE = 0;
+    private const COMMAND_STATE_ACCEPTED = 1;
+    private const COMMAND_STATE_RETURNING = 2;
+    private const COMMAND_STATE_VERIFIED = 3;
+    private const COMMAND_STATE_ALREADY_IN_STATE = 4;
+    private const COMMAND_STATE_TIMED_OUT = 5;
+    private const COMMAND_STATE_FAILED = 6;
 
     public function Create()
     {
@@ -31,6 +42,9 @@ class NavimowDevice extends IPSModule
         $this->RegisterAttributeBoolean('CommandActive', false);
         $this->RegisterAttributeInteger('CommandCloudResult', 0);
         $this->RegisterAttributeInteger('CommandStatusBaseline', 0);
+        $this->RegisterAttributeInteger('CommandStartedAt', 0);
+        $this->RegisterAttributeInteger('CommandDeadline', 0);
+        $this->RegisterAttributeInteger('CommandVerificationState', self::COMMAND_STATE_IDLE);
 
         $this->RegisterTimer(
             'CommandVerification',
@@ -59,10 +73,7 @@ class NavimowDevice extends IPSModule
         }
 
         if ($this->ReadAttributeBoolean('CommandActive')) {
-            $this->SetTimerInterval(
-                'CommandVerification',
-                self::COMMAND_VERIFICATION_DELAY_MILLISECONDS
-            );
+            $this->scheduleNextCommandVerification();
         } else {
             $this->SetTimerInterval('CommandVerification', 0);
         }
@@ -174,6 +185,15 @@ class NavimowDevice extends IPSModule
             'CommandStatusBaseline',
             $this->GetValue('LastStatusUpdate')
         );
+        $this->WriteAttributeInteger('CommandStartedAt', $now);
+        $this->WriteAttributeInteger(
+            'CommandDeadline',
+            $now + self::COMMAND_VERIFICATION_TIMEOUT_SECONDS
+        );
+        $this->WriteAttributeInteger(
+            'CommandVerificationState',
+            self::COMMAND_STATE_ACCEPTED
+        );
         $this->SetValue('LastCommand', self::COMMAND_DOCK);
         $this->SetValue('LastCommandAt', $now);
         $this->SetValue(
@@ -225,11 +245,14 @@ class NavimowDevice extends IPSModule
                 'CommandCloudResult',
                 $cloudResult
             );
+            if ($cloudResult === self::COMMAND_RESULT_ALREADY_IN_STATE) {
+                $this->WriteAttributeInteger(
+                    'CommandVerificationState',
+                    self::COMMAND_STATE_ALREADY_IN_STATE
+                );
+            }
             $this->SetValue('LastCommandResult', $cloudResult);
-            $this->SetTimerInterval(
-                'CommandVerification',
-                self::COMMAND_VERIFICATION_DELAY_MILLISECONDS
-            );
+            $this->scheduleNextCommandVerification();
 
             return $cloudResult === self::COMMAND_RESULT_ALREADY_IN_STATE
                 ? 'Dock command is already in state.'
@@ -270,19 +293,48 @@ class NavimowDevice extends IPSModule
         $vehicleState = $this->GetValue('VehicleState');
         $verified = is_int($lastStatusUpdate)
             && $lastStatusUpdate > $statusBaseline
-            && $vehicleState === 2;
+            && $vehicleState === self::VEHICLE_STATE_DOCKED;
 
         if ($verified) {
             $result = $cloudResult === self::COMMAND_RESULT_ALREADY_IN_STATE
                 ? self::COMMAND_RESULT_ALREADY_IN_STATE
                 : self::COMMAND_RESULT_VERIFIED;
+            $this->WriteAttributeInteger(
+                'CommandVerificationState',
+                $cloudResult === self::COMMAND_RESULT_ALREADY_IN_STATE
+                    ? self::COMMAND_STATE_ALREADY_IN_STATE
+                    : self::COMMAND_STATE_VERIFIED
+            );
             $this->finishCommand($result, '');
             return;
         }
 
+        if (
+            is_int($lastStatusUpdate)
+            && $lastStatusUpdate > $statusBaseline
+            && $vehicleState === self::VEHICLE_STATE_DOCKING
+        ) {
+            $this->WriteAttributeInteger(
+                'CommandVerificationState',
+                self::COMMAND_STATE_RETURNING
+            );
+            $this->scheduleNextCommandVerification();
+            return;
+        }
+
+        $deadline = $this->ReadAttributeInteger('CommandDeadline');
+        if ($deadline > 0 && time() < $deadline) {
+            $this->scheduleNextCommandVerification();
+            return;
+        }
+
+        $this->WriteAttributeInteger(
+            'CommandVerificationState',
+            self::COMMAND_STATE_TIMED_OUT
+        );
         $this->finishCommand(
             self::COMMAND_RESULT_VERIFICATION_TIMEOUT,
-            'Dock state was not confirmed by the verification read.'
+            'Docked state was not confirmed before the verification timeout.'
         );
     }
 
@@ -366,6 +418,30 @@ class NavimowDevice extends IPSModule
         $this->WriteAttributeBoolean('CommandActive', false);
         $this->WriteAttributeInteger('CommandCloudResult', 0);
         $this->WriteAttributeInteger('CommandStatusBaseline', 0);
+        $this->WriteAttributeInteger('CommandStartedAt', 0);
+        $this->WriteAttributeInteger('CommandDeadline', 0);
+        if ($result === self::COMMAND_RESULT_FAILED) {
+            $this->WriteAttributeInteger(
+                'CommandVerificationState',
+                self::COMMAND_STATE_FAILED
+            );
+        }
+    }
+
+    private function scheduleNextCommandVerification(): void
+    {
+        $deadline = $this->ReadAttributeInteger('CommandDeadline');
+        if ($deadline > 0 && time() >= $deadline) {
+            $this->SetTimerInterval('CommandVerification', 1);
+            return;
+        }
+
+        $state = $this->ReadAttributeInteger('CommandVerificationState');
+        $interval = $state === self::COMMAND_STATE_RETURNING
+            ? self::COMMAND_VERIFICATION_POLL_MILLISECONDS
+            : self::COMMAND_VERIFICATION_DELAY_MILLISECONDS;
+
+        $this->SetTimerInterval('CommandVerification', $interval);
     }
 
     private function limitMessage(string $message): string
