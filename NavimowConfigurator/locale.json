@@ -2,7 +2,11 @@
   "translations": {
     "de": {
       "Navimow Configurator": "Navimow Konfigurator",
-      "Discovery UI is scaffolded only. It will read sanitized account discovery data in a later SAEF step.": "Die Discovery-Oberflaeche ist nur vorbereitet. Sie liest in einem spaeteren SAEF-Schritt bereinigte Konto-Discovery-Daten."
+      "The dynamic configurator loads sanitized discovery data from the connected Navimow Account.": "Der dynamische Konfigurator laedt bereinigte Discovery-Daten vom verbundenen Navimow-Konto.",
+      "Discovered Navimow Devices": "Gefundene Navimow-Geraete",
+      "Name": "Name",
+      "Model": "Modell",
+      "Firmware": "Firmware"
     }
   }
 }

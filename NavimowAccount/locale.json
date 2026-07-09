@@ -12,9 +12,10 @@
       "Authorization Code or Redirect URL": "Autorisierungscode oder Redirect-URL",
       "Exchange Authorization Code": "Autorisierungscode austauschen",
       "Refresh Token": "Token aktualisieren",
+      "Discover Devices": "Geraete suchen",
       "Reset Authentication": "Authentifizierung zuruecksetzen",
       "Clear all stored Navimow tokens?": "Alle gespeicherten Navimow-Tokens loeschen?",
-      "Discovery, status polling and mower commands remain disabled in this implementation step.": "Discovery, Statusabfrage und Maeherbefehle bleiben in diesem Implementierungsschritt deaktiviert."
+      "Discovery and read-only status polling are enabled. Mower commands remain disabled.": "Discovery und lesende Statusabfrage sind aktiviert. Maeherbefehle bleiben deaktiviert."
     }
   }
 }

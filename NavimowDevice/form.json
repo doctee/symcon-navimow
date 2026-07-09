@@ -18,8 +18,13 @@
   ],
   "actions": [
     {
+      "type": "Button",
+      "caption": "Refresh Status",
+      "onClick": "echo NAVDV_RefreshStatus($id);"
+    },
+    {
       "type": "Label",
-      "caption": "Device state and command actions are scaffolded only. Live commands are not implemented in this step."
+      "caption": "Read-only status is enabled. Mower commands remain disabled."
     }
   ]
 }

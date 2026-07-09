@@ -11,6 +11,8 @@
     "{54620029-127D-470D-97C7-44265496FAA0}"
   ],
   "childRequirements": [],
-  "implemented": [],
+  "implemented": [
+    "{54620029-127D-470D-97C7-44265496FAA0}"
+  ],
   "prefix": "NAVDV"
 }

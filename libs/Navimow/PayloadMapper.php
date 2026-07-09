@@ -127,9 +127,12 @@ final class PayloadMapper
         }, $devices)));
     }
 
-    public static function mapStatus(array $payload): array
+    public static function mapStatus(
+        array $payload,
+        ?string $deviceId = null
+    ): array
     {
-        $device = self::payloadDevices($payload)[0] ?? [];
+        $device = self::findDevice($payload, $deviceId);
         $sourceState = isset($device['vehicleState']) && is_string($device['vehicleState'])
             ? $device['vehicleState']
             : null;
@@ -196,6 +199,25 @@ final class PayloadMapper
         }
 
         return array_values(array_filter($devices, static fn ($device): bool => is_array($device)));
+    }
+
+    private static function findDevice(
+        array $payload,
+        ?string $deviceId
+    ): array {
+        $devices = self::payloadDevices($payload);
+        if ($deviceId === null) {
+            return $devices[0] ?? [];
+        }
+
+        foreach ($devices as $device) {
+            $candidate = $device['id'] ?? $device['device_id'] ?? null;
+            if (is_string($candidate) && hash_equals($deviceId, $candidate)) {
+                return $device;
+            }
+        }
+
+        return [];
     }
 
     private static function mapBatteryLevel(array $device): ?int

@@ -55,13 +55,18 @@
     },
     {
       "type": "Button",
+      "caption": "Discover Devices",
+      "onClick": "echo NAVAC_DiscoverDevices($id);"
+    },
+    {
+      "type": "Button",
       "caption": "Reset Authentication",
       "confirm": "Clear all stored Navimow tokens?",
       "onClick": "NAVAC_ResetAuthentication($id); echo 'Authentication reset.';"
     },
     {
       "type": "Label",
-      "caption": "Discovery, status polling and mower commands remain disabled in this implementation step."
+      "caption": "Discovery and read-only status polling are enabled. Mower commands remain disabled."
     }
   ]
 }

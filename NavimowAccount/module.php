@@ -9,6 +9,8 @@ require_once __DIR__ . '/../libs/Navimow/Profiles.php';
 
 class NavimowAccount extends IPSModule
 {
+    private const DATA_INTERFACE = '{54620029-127D-470D-97C7-44265496FAA0}';
+    private const MESSAGE_SCHEMA_VERSION = 1;
     private const LOGIN_URL = 'https://navimow-h5-fra.willand.com/smartHome/login';
     private const TOKEN_REFRESH_MARGIN_SECONDS = 300;
     private const MINIMUM_REFRESH_DELAY_SECONDS = 60;
@@ -65,21 +67,22 @@ class NavimowAccount extends IPSModule
         $this->RegisterVariableInteger('LastRestSuccess', 'Last REST Success', '~UnixTimestamp', 50);
         $this->RegisterVariableInteger('RestErrorCount', 'REST Error Count', '', 60);
 
-        $this->SetTimerInterval('PollStatus', 0);
-
         if (!$this->hasValidConfiguration()) {
+            $this->SetTimerInterval('PollStatus', 0);
             $this->SetTimerInterval('RefreshToken', 0);
             $this->setAuthenticationState(self::STATE_CONFIGURATION_ERROR, true);
             return;
         }
 
         if ($this->ReadAttributeString('AccessToken') === '') {
+            $this->SetTimerInterval('PollStatus', 0);
             $this->SetTimerInterval('RefreshToken', 0);
             $this->setAuthenticationState(self::STATE_AUTHORIZATION_PENDING, true);
             return;
         }
 
         $this->scheduleTokenRefresh();
+        $this->schedulePolling();
         $this->setAuthenticationState(self::STATE_CONNECTED, false);
     }
 
@@ -141,6 +144,7 @@ class NavimowAccount extends IPSModule
             $this->storeTokenResponse($tokens, false);
             $this->WriteAttributeString('OAuthState', '');
             $this->SetValue('LastRestSuccess', time());
+            $this->schedulePolling();
             $this->setAuthenticationState(self::STATE_CONNECTED, false);
 
             return 'Authentication succeeded.';
@@ -183,6 +187,7 @@ class NavimowAccount extends IPSModule
             $tokens = Navimow\PayloadMapper::parseTokenResponse($response);
             $this->storeTokenResponse($tokens, true);
             $this->SetValue('LastRestSuccess', time());
+            $this->schedulePolling();
             $this->setAuthenticationState(self::STATE_CONNECTED, false);
 
             return 'Token refresh succeeded.';
@@ -213,21 +218,77 @@ class NavimowAccount extends IPSModule
 
     public function PollReadOnlyStatus(): void
     {
-        $this->SetTimerInterval('PollStatus', 0);
-        $this->setAuthenticationState(self::STATE_API_WARNING, false);
-        $this->SendDebug(
-            'PollReadOnlyStatus',
-            'Read-only discovery and status polling are gated for the next implementation step.',
-            0
-        );
+        if (!$this->hasUsableAccessToken()) {
+            $this->SetTimerInterval('PollStatus', 0);
+            return;
+        }
+
+        $this->SendDataToChildren(json_encode([
+            'DataID' => self::DATA_INTERFACE,
+            'SchemaVersion' => self::MESSAGE_SCHEMA_VERSION,
+            'Function' => 'PollStatus',
+        ], JSON_THROW_ON_ERROR));
     }
 
     public function ForwardData($JSONString)
     {
-        return json_encode([
-            'status' => 'not_implemented',
-            'message' => 'Discovery and read-only status are implemented after the authentication gate.',
-        ], JSON_THROW_ON_ERROR);
+        try {
+            $message = json_decode(
+                $JSONString,
+                true,
+                32,
+                JSON_THROW_ON_ERROR
+            );
+            if (!is_array($message)) {
+                throw new InvalidArgumentException('Message must be an object.');
+            }
+
+            if (($message['DataID'] ?? null) !== self::DATA_INTERFACE) {
+                throw new InvalidArgumentException('Unsupported data interface.');
+            }
+
+            if (($message['SchemaVersion'] ?? null) !== self::MESSAGE_SCHEMA_VERSION) {
+                throw new InvalidArgumentException('Unsupported message schema version.');
+            }
+
+            $function = $message['Function'] ?? null;
+            if ($function === 'GetDiscovery') {
+                return $this->encodeResult($this->performDiscovery());
+            }
+
+            if ($function === 'GetStatus') {
+                $deviceId = $this->validateDeviceId($message['DeviceId'] ?? null);
+                return $this->encodeResult($this->performStatus($deviceId));
+            }
+
+            throw new InvalidArgumentException('Unsupported account function.');
+        } catch (Throwable $exception) {
+            $this->recordReadFailure($exception);
+
+            return $this->encodeResult([
+                'status' => 'error',
+                'kind' => $exception instanceof Navimow\ApiException
+                    ? $exception->getKind()
+                    : 'protocol',
+                'message' => $this->sanitizedErrorMessage($exception),
+                'staleAfter' => $this->staleAfterSeconds(),
+            ]);
+        }
+    }
+
+    public function DiscoverDevices(): string
+    {
+        try {
+            $result = $this->performDiscovery();
+
+            return sprintf(
+                'Discovery succeeded with %d device(s).',
+                count($result['devices'])
+            );
+        } catch (Throwable $exception) {
+            $this->recordReadFailure($exception);
+            return $this->sanitizedErrorMessage($exception);
+        }
     }
 
     private function createApiClient(): Navimow\ApiClient
@@ -288,6 +349,194 @@ class NavimowAccount extends IPSModule
 
         $delay = max(self::MINIMUM_REFRESH_DELAY_SECONDS, $delay);
         $this->SetTimerInterval('RefreshToken', $delay * 1000);
+    }
+
+    private function schedulePolling(): void
+    {
+        if (!$this->hasUsableAccessToken()) {
+            $this->SetTimerInterval('PollStatus', 0);
+            return;
+        }
+
+        $interval = max(60, $this->ReadPropertyInteger('PollInterval'));
+        $this->SetTimerInterval('PollStatus', $interval * 1000);
+    }
+
+    private function performDiscovery(): array
+    {
+        return $this->withAccountLock(function (): array {
+            $response = $this->createApiClient()->getAuthorizedDevices(
+                $this->requireAccessToken()
+            );
+            $this->assertApiSuccess($response);
+            $devices = Navimow\PayloadMapper::mapDiscovery($response);
+
+            $encoded = json_encode($devices, JSON_THROW_ON_ERROR);
+            if (strlen($encoded) > 65536) {
+                throw new UnexpectedValueException(
+                    'Discovery result exceeded the size limit.'
+                );
+            }
+
+            $now = time();
+            $this->WriteAttributeString('DiscoveryCache', $encoded);
+            $this->SetValue('LastDiscovery', $now);
+            $this->SetValue('LastRestSuccess', $now);
+            $this->setAuthenticationState(self::STATE_CONNECTED, false);
+
+            return [
+                'status' => 'ok',
+                'devices' => $devices,
+                'receivedAt' => $now,
+            ];
+        });
+    }
+
+    private function performStatus(string $deviceId): array
+    {
+        return $this->withAccountLock(function () use ($deviceId): array {
+            $response = $this->createApiClient()->getVehicleStatus(
+                $this->requireAccessToken(),
+                $deviceId
+            );
+            $this->assertApiSuccess($response);
+            $status = Navimow\PayloadMapper::mapStatus($response, $deviceId);
+
+            if ($status['vehicleStateSource'] === null) {
+                throw new UnexpectedValueException(
+                    'Status response did not contain the requested device.'
+                );
+            }
+
+            $now = time();
+            $this->SetValue('LastRestSuccess', $now);
+            $this->setAuthenticationState(self::STATE_CONNECTED, false);
+
+            return [
+                'status' => 'ok',
+                'deviceId' => $deviceId,
+                'data' => $status,
+                'receivedAt' => $now,
+                'staleAfter' => $this->staleAfterSeconds(),
+            ];
+        });
+    }
+
+    private function withAccountLock(callable $operation): array
+    {
+        $lockName = $this->lockName();
+        if (!IPS_SemaphoreEnter($lockName, self::SEMAPHORE_TIMEOUT_MILLISECONDS)) {
+            throw new Navimow\ApiException(
+                'concurrency',
+                'Another account operation is still running.'
+            );
+        }
+
+        try {
+            return $operation();
+        } finally {
+            IPS_SemaphoreLeave($lockName);
+        }
+    }
+
+    private function requireAccessToken(): string
+    {
+        if (!$this->hasUsableAccessToken()) {
+            throw new Navimow\ApiException(
+                'authentication',
+                'A usable access token is not available.'
+            );
+        }
+
+        return $this->ReadAttributeString('AccessToken');
+    }
+
+    private function hasUsableAccessToken(): bool
+    {
+        return $this->ReadAttributeString('AccessToken') !== ''
+            && $this->ReadAttributeInteger('TokenExpiresAtInternal') > time();
+    }
+
+    private function assertApiSuccess(array $response): void
+    {
+        $error = Navimow\PayloadMapper::mapApiError($response);
+        if ($error['reauthRequired']) {
+            throw new Navimow\ApiException(
+                'authentication',
+                'Navimow rejected the OAuth information.',
+                200,
+                $error['code']
+            );
+        }
+
+        try {
+            Navimow\PayloadMapper::assertApiSuccess($response);
+        } catch (UnexpectedValueException $exception) {
+            throw new Navimow\ApiException(
+                'api',
+                $this->sanitizedErrorMessage($exception),
+                200,
+                $error['code'],
+                null,
+                $exception
+            );
+        }
+    }
+
+    private function recordReadFailure(Throwable $exception): void
+    {
+        $this->SetValue(
+            'RestErrorCount',
+            $this->GetValue('RestErrorCount') + 1
+        );
+
+        $state = self::STATE_API_WARNING;
+        $reauthRequired = false;
+        if ($exception instanceof Navimow\ApiException) {
+            if ($exception->getKind() === 'transport') {
+                $state = self::STATE_OFFLINE;
+            } elseif ($exception->getKind() === 'authentication') {
+                $state = self::STATE_REAUTH_REQUIRED;
+                $reauthRequired = true;
+                $this->SetTimerInterval('PollStatus', 0);
+            } elseif ($exception->getKind() === 'configuration') {
+                $state = self::STATE_CONFIGURATION_ERROR;
+            }
+        }
+
+        $this->setAuthenticationState($state, $reauthRequired);
+        $this->SendDebug(
+            'ReadFailure',
+            sprintf(
+                '%s: %s',
+                get_class($exception),
+                $this->sanitizedErrorMessage($exception)
+            ),
+            0
+        );
+    }
+
+    private function validateDeviceId(mixed $deviceId): string
+    {
+        if (
+            !is_string($deviceId)
+            || $deviceId === ''
+            || strlen($deviceId) > 128
+        ) {
+            throw new InvalidArgumentException('Device ID is invalid.');
+        }
+
+        return $deviceId;
+    }
+
+    private function staleAfterSeconds(): int
+    {
+        return max(300, max(60, $this->ReadPropertyInteger('PollInterval')) * 2);
+    }
+
+    private function encodeResult(array $result): string
+    {
+        return json_encode($result, JSON_THROW_ON_ERROR);
     }
 
     private function throwForApiAuthError(array $response): void

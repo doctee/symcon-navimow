@@ -13,8 +13,9 @@ Current scope:
 - account, device and configurator instances;
 - variable profile and variable registration;
 - supervised OAuth authorization-code exchange and token refresh;
-- REST client boundary with discovery and status methods still gated;
-- no active discovery, status polling, MQTT/WSS or mower commands.
+- account-owned discovery and dynamic device configuration;
+- read-only device status and conservative freshness polling;
+- no MQTT/WSS or mower commands.
 
 Source engineering documentation:
 
