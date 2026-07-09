@@ -10,6 +10,15 @@ class NavimowDevice extends IPSModule
     private const MESSAGE_SCHEMA_VERSION = 1;
     private const VEHICLE_STATE_OFFLINE = 11;
     private const MAX_DEBUG_JSON_BYTES = 16384;
+    private const COMMAND_DOCK = 6;
+    private const COMMAND_RESULT_REQUESTED = 1;
+    private const COMMAND_RESULT_ACCEPTED = 2;
+    private const COMMAND_RESULT_ALREADY_IN_STATE = 3;
+    private const COMMAND_RESULT_PENDING_VERIFICATION = 4;
+    private const COMMAND_RESULT_VERIFIED = 5;
+    private const COMMAND_RESULT_FAILED = 7;
+    private const COMMAND_RESULT_VERIFICATION_TIMEOUT = 8;
+    private const COMMAND_VERIFICATION_DELAY_MILLISECONDS = 5000;
 
     public function Create()
     {
@@ -18,6 +27,16 @@ class NavimowDevice extends IPSModule
         $this->RegisterPropertyString('DeviceId', '');
         $this->RegisterPropertyString('DisplayName', '');
         $this->RegisterPropertyBoolean('DebugPayloads', false);
+
+        $this->RegisterAttributeBoolean('CommandActive', false);
+        $this->RegisterAttributeInteger('CommandCloudResult', 0);
+        $this->RegisterAttributeInteger('CommandStatusBaseline', 0);
+
+        $this->RegisterTimer(
+            'CommandVerification',
+            0,
+            'NAVDV_VerifyCommand($_IPS["TARGET"]);'
+        );
     }
 
     public function ApplyChanges()
@@ -37,6 +56,15 @@ class NavimowDevice extends IPSModule
 
         if ($this->ReadPropertyBoolean('DebugPayloads')) {
             $this->RegisterVariableString('RawStatusJson', 'Raw Status JSON', '', 90);
+        }
+
+        if ($this->ReadAttributeBoolean('CommandActive')) {
+            $this->SetTimerInterval(
+                'CommandVerification',
+                self::COMMAND_VERIFICATION_DELAY_MILLISECONDS
+            );
+        } else {
+            $this->SetTimerInterval('CommandVerification', 0);
         }
     }
 
@@ -120,7 +148,142 @@ class NavimowDevice extends IPSModule
             return;
         }
 
+        if ($Ident === 'Dock') {
+            $this->Dock();
+            return;
+        }
+
         throw new InvalidArgumentException('Unsupported device action.');
+    }
+
+    public function Dock(): string
+    {
+        if ($this->ReadAttributeBoolean('CommandActive')) {
+            return 'Another mower command is still being verified.';
+        }
+
+        $deviceId = trim($this->ReadPropertyString('DeviceId'));
+        if ($deviceId === '') {
+            return 'Device ID is not configured.';
+        }
+
+        $now = time();
+        $this->WriteAttributeBoolean('CommandActive', true);
+        $this->WriteAttributeInteger('CommandCloudResult', 0);
+        $this->WriteAttributeInteger(
+            'CommandStatusBaseline',
+            $this->GetValue('LastStatusUpdate')
+        );
+        $this->SetValue('LastCommand', self::COMMAND_DOCK);
+        $this->SetValue('LastCommandAt', $now);
+        $this->SetValue(
+            'LastCommandResult',
+            self::COMMAND_RESULT_REQUESTED
+        );
+        $this->SetValue('LastCommandError', '');
+
+        try {
+            $response = $this->SendDataToParent(json_encode([
+                'DataID' => self::DATA_INTERFACE,
+                'SchemaVersion' => self::MESSAGE_SCHEMA_VERSION,
+                'Function' => 'SendCommand',
+                'DeviceId' => $deviceId,
+                'Command' => 'Dock',
+            ], JSON_THROW_ON_ERROR));
+
+            $result = json_decode(
+                $response,
+                true,
+                32,
+                JSON_THROW_ON_ERROR
+            );
+            if (!is_array($result)) {
+                throw new UnexpectedValueException(
+                    'Account returned an invalid command result.'
+                );
+            }
+
+            if (($result['status'] ?? null) !== 'ok') {
+                throw new RuntimeException(
+                    is_string($result['message'] ?? null)
+                        ? $result['message']
+                        : 'Dock command failed.'
+                );
+            }
+
+            $cloudResult = $result['result'] ?? null;
+            if (
+                $cloudResult !== self::COMMAND_RESULT_ACCEPTED
+                && $cloudResult !== self::COMMAND_RESULT_ALREADY_IN_STATE
+            ) {
+                throw new UnexpectedValueException(
+                    'Account returned an unsupported command result.'
+                );
+            }
+
+            $this->WriteAttributeInteger(
+                'CommandCloudResult',
+                $cloudResult
+            );
+            $this->SetValue('LastCommandResult', $cloudResult);
+            $this->SetTimerInterval(
+                'CommandVerification',
+                self::COMMAND_VERIFICATION_DELAY_MILLISECONDS
+            );
+
+            return $cloudResult === self::COMMAND_RESULT_ALREADY_IN_STATE
+                ? 'Dock command is already in state.'
+                : 'Dock command was accepted.';
+        } catch (Throwable $exception) {
+            $this->finishCommand(
+                self::COMMAND_RESULT_FAILED,
+                $this->limitMessage($exception->getMessage())
+            );
+
+            return $this->limitMessage($exception->getMessage());
+        }
+    }
+
+    public function VerifyCommand(): void
+    {
+        $this->SetTimerInterval('CommandVerification', 0);
+        if (!$this->ReadAttributeBoolean('CommandActive')) {
+            return;
+        }
+
+        $cloudResult = $this->ReadAttributeInteger(
+            'CommandCloudResult'
+        );
+        if ($cloudResult === self::COMMAND_RESULT_ACCEPTED) {
+            $this->SetValue(
+                'LastCommandResult',
+                self::COMMAND_RESULT_PENDING_VERIFICATION
+            );
+        }
+
+        $this->RefreshStatus();
+
+        $statusBaseline = $this->ReadAttributeInteger(
+            'CommandStatusBaseline'
+        );
+        $lastStatusUpdate = $this->GetValue('LastStatusUpdate');
+        $vehicleState = $this->GetValue('VehicleState');
+        $verified = is_int($lastStatusUpdate)
+            && $lastStatusUpdate > $statusBaseline
+            && $vehicleState === 2;
+
+        if ($verified) {
+            $result = $cloudResult === self::COMMAND_RESULT_ALREADY_IN_STATE
+                ? self::COMMAND_RESULT_ALREADY_IN_STATE
+                : self::COMMAND_RESULT_VERIFIED;
+            $this->finishCommand($result, '');
+            return;
+        }
+
+        $this->finishCommand(
+            self::COMMAND_RESULT_VERIFICATION_TIMEOUT,
+            'Dock state was not confirmed by the verification read.'
+        );
     }
 
     private function applyStatusResult(array $result): void
@@ -193,6 +356,16 @@ class NavimowDevice extends IPSModule
             ),
             0
         );
+    }
+
+    private function finishCommand(int $result, string $error): void
+    {
+        $this->SetTimerInterval('CommandVerification', 0);
+        $this->SetValue('LastCommandResult', $result);
+        $this->SetValue('LastCommandError', $this->limitMessage($error));
+        $this->WriteAttributeBoolean('CommandActive', false);
+        $this->WriteAttributeInteger('CommandCloudResult', 0);
+        $this->WriteAttributeInteger('CommandStatusBaseline', 0);
     }
 
     private function limitMessage(string $message): string

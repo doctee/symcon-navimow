@@ -23,8 +23,14 @@
       "onClick": "echo NAVDV_RefreshStatus($id);"
     },
     {
+      "type": "Button",
+      "caption": "Dock",
+      "confirm": "Send the mower to the dock?",
+      "onClick": "echo NAVDV_Dock($id);"
+    },
+    {
       "type": "Label",
-      "caption": "Read-only status is enabled. Mower commands remain disabled."
+      "caption": "Dock is the only enabled mower command."
     }
   ]
 }

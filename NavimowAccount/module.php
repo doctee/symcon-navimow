@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../libs/Navimow/ApiClient.php';
+require_once __DIR__ . '/../libs/Navimow/CommandContract.php';
 require_once __DIR__ . '/../libs/Navimow/OAuthHelper.php';
 require_once __DIR__ . '/../libs/Navimow/PayloadMapper.php';
 require_once __DIR__ . '/../libs/Navimow/Profiles.php';
@@ -261,6 +262,18 @@ class NavimowAccount extends IPSModule
                 return $this->encodeResult($this->performStatus($deviceId));
             }
 
+            if ($function === 'SendCommand') {
+                $deviceId = $this->validateDeviceId($message['DeviceId'] ?? null);
+                $command = $message['Command'] ?? null;
+                if (!is_string($command)) {
+                    throw new InvalidArgumentException('Command is invalid.');
+                }
+
+                return $this->encodeResult(
+                    $this->performCommand($deviceId, $command)
+                );
+            }
+
             throw new InvalidArgumentException('Unsupported account function.');
         } catch (Throwable $exception) {
             $this->recordReadFailure($exception);
@@ -418,6 +431,41 @@ class NavimowAccount extends IPSModule
                 'data' => $status,
                 'receivedAt' => $now,
                 'staleAfter' => $this->staleAfterSeconds(),
+            ];
+        });
+    }
+
+    private function performCommand(
+        string $deviceId,
+        string $command
+    ): array {
+        $payload = Navimow\CommandContract::createPayload(
+            $command,
+            $deviceId
+        );
+
+        return $this->withAccountLock(function () use (
+            $deviceId,
+            $payload
+        ): array {
+            $response = $this->createApiClient()->sendCommands(
+                $this->requireAccessToken(),
+                $payload
+            );
+            $this->assertApiSuccess($response);
+            $result = Navimow\PayloadMapper::mapCommandResult(
+                $response,
+                $deviceId
+            );
+
+            $now = time();
+            $this->SetValue('LastRestSuccess', $now);
+            $this->setAuthenticationState(self::STATE_CONNECTED, false);
+
+            return [
+                'status' => 'ok',
+                'result' => $result['result'],
+                'receivedAt' => $now,
             ];
         });
     }

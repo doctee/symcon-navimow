@@ -78,6 +78,16 @@ final class ApiClient
         );
     }
 
+    public function sendCommands(string $accessToken, array $payload): array
+    {
+        return $this->authorizedRequest(
+            'POST',
+            '/openapi/smarthome/sendCommands',
+            $accessToken,
+            $payload
+        );
+    }
+
     private function tokenRequest(array $fields): array
     {
         return $this->send([

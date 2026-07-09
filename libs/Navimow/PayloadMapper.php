@@ -149,9 +149,47 @@ final class PayloadMapper
         ];
     }
 
-    public static function mapCommandResult(array $payload): array
+    public static function mapCommandResult(
+        array $payload,
+        string $deviceId
+    ): array
     {
-        $command = $payload['data']['payload']['commands'][0] ?? [];
+        $commands = $payload['data']['payload']['commands'] ?? null;
+        if (!is_array($commands) || $commands === []) {
+            throw new \UnexpectedValueException(
+                'Command response does not contain command results.'
+            );
+        }
+
+        $command = null;
+        foreach ($commands as $candidate) {
+            if (!is_array($candidate)) {
+                continue;
+            }
+
+            $devices = $candidate['devices'] ?? null;
+            if (!is_array($devices)) {
+                continue;
+            }
+
+            foreach ($devices as $device) {
+                if (
+                    is_array($device)
+                    && is_string($device['id'] ?? null)
+                    && hash_equals($deviceId, $device['id'])
+                ) {
+                    $command = $candidate;
+                    break 2;
+                }
+            }
+        }
+
+        if ($command === null) {
+            throw new \UnexpectedValueException(
+                'Command response does not contain the requested device.'
+            );
+        }
+
         $status = isset($command['status']) && is_string($command['status']) ? $command['status'] : null;
         $errorCode = isset($command['errorCode']) && is_string($command['errorCode']) ? $command['errorCode'] : null;
 
@@ -171,11 +209,9 @@ final class PayloadMapper
             ];
         }
 
-        return [
-            'result' => self::COMMAND_RESULT_FAILED,
-            'errorCode' => $errorCode,
-            'status' => $status,
-        ];
+        throw new \UnexpectedValueException(
+            'Navimow command response was not accepted.'
+        );
     }
 
     public static function mapApiError(array $payload): array

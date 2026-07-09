@@ -15,7 +15,8 @@ Current scope:
 - supervised OAuth authorization-code exchange and token refresh;
 - account-owned discovery and dynamic device configuration;
 - read-only device status and conservative freshness polling;
-- no MQTT/WSS or mower commands.
+- Dock-first command handling with delayed read-only verification;
+- no Start, Stop, Pause, Resume or MQTT/WSS support.
 
 Source engineering documentation:
 
