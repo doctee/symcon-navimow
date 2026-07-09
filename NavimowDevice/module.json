@@ -6,6 +6,7 @@
   "aliases": [
     "Navimow Device"
   ],
+  "url": "https://github.com/doctee/symcon-navimow",
   "parentRequirements": [
     "{54620029-127D-470D-97C7-44265496FAA0}"
   ],
