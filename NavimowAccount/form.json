@@ -11,6 +11,16 @@
       "caption": "OAuth Client ID"
     },
     {
+      "type": "PasswordTextBox",
+      "name": "ClientSecret",
+      "caption": "OAuth Client Secret"
+    },
+    {
+      "type": "ValidationTextBox",
+      "name": "RedirectUri",
+      "caption": "OAuth Redirect URI"
+    },
+    {
       "type": "NumberSpinner",
       "name": "PollInterval",
       "caption": "Poll Interval (seconds)",
@@ -24,8 +34,34 @@
   ],
   "actions": [
     {
+      "type": "Button",
+      "caption": "Open Navimow Login",
+      "onClick": "echo NAVAC_GetAuthorizationUrl($id);"
+    },
+    {
+      "type": "PasswordTextBox",
+      "name": "AuthorizationInput",
+      "caption": "Authorization Code or Redirect URL"
+    },
+    {
+      "type": "Button",
+      "caption": "Exchange Authorization Code",
+      "onClick": "echo NAVAC_ExchangeAuthorizationCode($id, $AuthorizationInput);"
+    },
+    {
+      "type": "Button",
+      "caption": "Refresh Token",
+      "onClick": "echo NAVAC_RefreshAuthentication($id);"
+    },
+    {
+      "type": "Button",
+      "caption": "Reset Authentication",
+      "confirm": "Clear all stored Navimow tokens?",
+      "onClick": "NAVAC_ResetAuthentication($id); echo 'Authentication reset.';"
+    },
+    {
       "type": "Label",
-      "caption": "REST behavior is scaffolded only. OAuth exchange, polling and commands are implemented in later SAEF steps."
+      "caption": "Discovery, status polling and mower commands remain disabled in this implementation step."
     }
   ]
 }

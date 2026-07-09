@@ -9,10 +9,12 @@ except for its reserved `libs` dependency directory.
 
 Current scope:
 
-- module metadata and lifecycle scaffold;
+- module metadata and lifecycle;
 - account, device and configurator instances;
 - variable profile and variable registration;
-- no OAuth, REST polling, MQTT/WSS or mower commands.
+- supervised OAuth authorization-code exchange and token refresh;
+- REST client boundary with discovery and status methods still gated;
+- no active discovery, status polling, MQTT/WSS or mower commands.
 
 Source engineering documentation:
 

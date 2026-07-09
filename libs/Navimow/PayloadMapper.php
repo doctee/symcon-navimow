@@ -53,6 +53,62 @@ final class PayloadMapper
         ];
     }
 
+    public static function parseTokenResponse(array $payload): array
+    {
+        $accessToken = $payload['access_token'] ?? null;
+        $refreshToken = $payload['refresh_token'] ?? null;
+        $tokenType = $payload['token_type'] ?? null;
+        $expiresIn = $payload['expires_in'] ?? null;
+
+        if (!is_string($accessToken) || $accessToken === '') {
+            throw new \UnexpectedValueException(
+                'Token response does not contain a usable access token.'
+            );
+        }
+
+        if ($refreshToken !== null && !is_string($refreshToken)) {
+            throw new \UnexpectedValueException(
+                'Token response contains an invalid refresh token.'
+            );
+        }
+
+        if ($tokenType !== null && (!is_string($tokenType) || strcasecmp($tokenType, 'Bearer') !== 0)) {
+            throw new \UnexpectedValueException(
+                'Token response contains an unsupported token type.'
+            );
+        }
+
+        if (!is_int($expiresIn) || $expiresIn <= 0) {
+            throw new \UnexpectedValueException(
+                'Token response does not contain a valid expiry.'
+            );
+        }
+
+        return [
+            'accessToken' => $accessToken,
+            'refreshToken' => $refreshToken,
+            'tokenType' => $tokenType ?? 'Bearer',
+            'expiresIn' => $expiresIn,
+        ];
+    }
+
+    public static function assertApiSuccess(array $payload): void
+    {
+        $code = $payload['code'] ?? null;
+        if ($code === 1) {
+            return;
+        }
+
+        $error = self::mapApiError($payload);
+        throw new \UnexpectedValueException(
+            sprintf(
+                'Navimow API failed with code %s: %s',
+                $error['code'] === null ? 'unknown' : (string) $error['code'],
+                self::limitDiagnostic($error['desc'])
+            )
+        );
+    }
+
     public static function mapDiscovery(array $payload): array
     {
         $devices = self::payloadDevices($payload);
@@ -169,5 +225,10 @@ final class PayloadMapper
         }
 
         return null;
+    }
+
+    private static function limitDiagnostic(string $value): string
+    {
+        return substr(preg_replace('/[[:cntrl:]]/', '', $value) ?? '', 0, 160);
     }
 }

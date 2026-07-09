@@ -4,9 +4,17 @@
       "Navimow Account": "Navimow Konto",
       "Base URL": "Basis-URL",
       "OAuth Client ID": "OAuth Client-ID",
+      "OAuth Client Secret": "OAuth Client-Secret",
+      "OAuth Redirect URI": "OAuth Redirect-URI",
       "Poll Interval (seconds)": "Abfrageintervall (Sekunden)",
       "Enable debug payload variable": "Debug-Payload-Variable aktivieren",
-      "REST behavior is scaffolded only. OAuth exchange, polling and commands are implemented in later SAEF steps.": "Das REST-Verhalten ist nur vorbereitet. OAuth-Austausch, Abfrage und Befehle werden in spaeteren SAEF-Schritten implementiert."
+      "Open Navimow Login": "Navimow-Anmeldung oeffnen",
+      "Authorization Code or Redirect URL": "Autorisierungscode oder Redirect-URL",
+      "Exchange Authorization Code": "Autorisierungscode austauschen",
+      "Refresh Token": "Token aktualisieren",
+      "Reset Authentication": "Authentifizierung zuruecksetzen",
+      "Clear all stored Navimow tokens?": "Alle gespeicherten Navimow-Tokens loeschen?",
+      "Discovery, status polling and mower commands remain disabled in this implementation step.": "Discovery, Statusabfrage und Maeherbefehle bleiben in diesem Implementierungsschritt deaktiviert."
     }
   }
 }
