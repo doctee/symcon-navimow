@@ -1,25 +1,142 @@
 # Navimow IP-Symcon Module
 
-This directory is the installable distribution root for the Navimow module
-scaffold developed by the SAEF Navimow case study.
+This repository is the installable distribution root for the Navimow module
+developed by the SAEF Navimow case study.
 
-The distribution is intentionally separate from the SAEF repository root.
-IP-Symcon treats first-level repository directories as module candidates,
-except for its reserved `libs` dependency directory.
+Status: private pilot / REST MVP.
 
-Current scope:
+The module integrates Segway Navimow robotic mowers through the Navimow cloud
+REST API. It is not an official Segway Navimow product.
 
-- module metadata and lifecycle;
-- account, device and configurator instances;
-- variable profile and variable registration;
-- supervised OAuth authorization-code exchange and token refresh;
-- account-owned discovery and dynamic device configuration;
-- read-only device status and conservative freshness polling;
-- Dock-first command handling with delayed read-only verification;
-- no Start, Stop, Pause, Resume or MQTT/WSS support.
+## Scope
 
-Source engineering documentation:
+Implemented:
+
+- account, configurator and device instances;
+- supervised OAuth authorization-code setup;
+- token refresh;
+- mower discovery;
+- read-only status refresh;
+- battery, online and vehicle-state variables;
+- Dock command;
+- long-running read-only Dock verification.
+
+Not implemented:
+
+- Start;
+- Stop;
+- Pause;
+- Resume;
+- MQTT/WSS realtime updates;
+- location or map data;
+- Symcon Store packaging.
+
+## Installation
+
+Use this repository as an IP-Symcon module source:
+
+```text
+https://github.com/doctee/symcon-navimow.git
+```
+
+Recommended private-pilot procedure:
+
+1. Add the repository in Symcon's module management.
+2. Create a `Navimow Account` instance.
+3. Configure the OAuth client settings.
+4. Run the supervised OAuth authorization flow.
+5. Create or use the `Navimow Configurator`.
+6. Create a `Navimow Device` instance for the discovered mower.
+7. Press `Refresh Status` and confirm that status values update.
+
+For private Git installations, update through Symcon's module management after
+new commits are published to the repository.
+
+## OAuth Notes
+
+The module currently expects a supervised authorization-code flow.
+
+OAuth credentials are installation-specific. Do not publish or share:
+
+- client secrets;
+- authorization codes;
+- access tokens;
+- refresh tokens;
+- raw OAuth callback URLs.
+
+If authentication fails, re-run the supervised authorization flow before
+testing commands.
+
+## Safe Command Use
+
+Dock is the only enabled mower command.
+
+Before pressing Dock:
+
+- keep the mower and docking station in sight;
+- keep the area clear;
+- keep the official Navimow app available;
+- be ready to use the physical stop control if needed.
+
+The module sends one Dock command per user action. After the cloud accepts the
+command, the module verifies progress with read-only status calls.
+
+Expected command result flow:
+
+```text
+Accepted -> Pending Verification -> Verified
+```
+
+If the mower is already docked, the expected result is:
+
+```text
+Already In State
+```
+
+## Dock Verification
+
+The Dock verification path treats `Docking` as valid progress.
+
+Timing model:
+
+- initial verification after about 5 seconds;
+- read-only polling every 60 seconds while the mower is returning;
+- maximum verification window of 15 minutes.
+
+`Verification Timeout` means that `Docked` was not confirmed within the window.
+It does not prove that the mower physically failed.
+
+## Known Limitations
+
+- The module uses an undocumented Navimow cloud API.
+- Status is REST-polled and may lag behind the official app.
+- Only one mower has direct live transition evidence in this case study.
+- Timeout, restart during active verification and cloud read failures need
+  additional pilot testing.
+- Non-Dock commands remain deliberately disabled.
+- MQTT/WSS realtime data is reserved for a later phase.
+
+## Privacy
+
+Do not share logs or payloads that contain:
+
+- OAuth credentials or tokens;
+- private device IDs;
+- account identifiers;
+- raw API payloads;
+- garden, map or location data;
+- private Symcon object IDs.
+
+## Engineering Documentation
+
+The engineering record for this MVP is maintained in:
 
 ```text
 case-studies/navimow/
+```
+
+The current release boundary is documented in:
+
+```text
+case-studies/navimow/31-rest-mvp-stabilization-and-release-check.md
 ```
