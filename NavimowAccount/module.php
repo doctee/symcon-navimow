@@ -15,6 +15,8 @@ class NavimowAccount extends IPSModule
     private const LOGIN_URL = 'https://navimow-h5-fra.willand.com/smartHome/login';
     private const TOKEN_REFRESH_MARGIN_SECONDS = 300;
     private const MINIMUM_REFRESH_DELAY_SECONDS = 60;
+    private const TOKEN_REFRESH_RETRY_DELAY_SECONDS = 60;
+    private const TOKEN_REFRESH_RETRY_MAX_ATTEMPTS = 5;
     private const SEMAPHORE_TIMEOUT_MILLISECONDS = 5000;
 
     private const STATE_UNCONFIGURED = 0;
@@ -40,6 +42,7 @@ class NavimowAccount extends IPSModule
         $this->RegisterAttributeString('AccessToken', '');
         $this->RegisterAttributeString('RefreshToken', '');
         $this->RegisterAttributeInteger('TokenExpiresAtInternal', 0);
+        $this->RegisterAttributeInteger('RefreshRetryCount', 0);
         $this->RegisterAttributeString('OAuthState', '');
         $this->RegisterAttributeString('DiscoveryCache', '[]');
 
@@ -82,9 +85,13 @@ class NavimowAccount extends IPSModule
             return;
         }
 
+        $retryCount = $this->ReadAttributeInteger('RefreshRetryCount');
         $this->scheduleTokenRefresh();
         $this->schedulePolling();
-        $this->setAuthenticationState(self::STATE_CONNECTED, false);
+        $this->setAuthenticationState(
+            $retryCount > 0 ? self::STATE_OFFLINE : self::STATE_CONNECTED,
+            false
+        );
     }
 
     public function GetAuthorizationUrl(): string
@@ -144,13 +151,13 @@ class NavimowAccount extends IPSModule
             $tokens = Navimow\PayloadMapper::parseTokenResponse($response);
             $this->storeTokenResponse($tokens, false);
             $this->WriteAttributeString('OAuthState', '');
-            $this->SetValue('LastRestSuccess', time());
+            $this->SetValue('LastRestSuccess', $this->currentTimestamp());
             $this->schedulePolling();
             $this->setAuthenticationState(self::STATE_CONNECTED, false);
 
             return 'Authentication succeeded.';
         } catch (Throwable $exception) {
-            $this->recordAuthenticationFailure($exception);
+            $this->recordAuthenticationFailure($exception, false);
             return $this->sanitizedErrorMessage($exception);
         } finally {
             IPS_SemaphoreLeave($lockName);
@@ -160,12 +167,16 @@ class NavimowAccount extends IPSModule
     public function RefreshAuthentication(): string
     {
         if (!$this->hasValidConfiguration()) {
+            $this->WriteAttributeInteger('RefreshRetryCount', 0);
+            $this->SetTimerInterval('RefreshToken', 0);
             $this->setAuthenticationState(self::STATE_CONFIGURATION_ERROR, true);
             return 'Authentication configuration is incomplete.';
         }
 
         $refreshToken = $this->ReadAttributeString('RefreshToken');
         if ($refreshToken === '') {
+            $this->WriteAttributeInteger('RefreshRetryCount', 0);
+            $this->SetTimerInterval('RefreshToken', 0);
             $this->setAuthenticationState(self::STATE_REAUTH_REQUIRED, true);
             return 'No refresh token is available.';
         }
@@ -187,13 +198,13 @@ class NavimowAccount extends IPSModule
             $this->throwForApiAuthError($response);
             $tokens = Navimow\PayloadMapper::parseTokenResponse($response);
             $this->storeTokenResponse($tokens, true);
-            $this->SetValue('LastRestSuccess', time());
+            $this->SetValue('LastRestSuccess', $this->currentTimestamp());
             $this->schedulePolling();
             $this->setAuthenticationState(self::STATE_CONNECTED, false);
 
             return 'Token refresh succeeded.';
         } catch (Throwable $exception) {
-            $this->recordAuthenticationFailure($exception);
+            $this->recordAuthenticationFailure($exception, true);
             return $this->sanitizedErrorMessage($exception);
         } finally {
             IPS_SemaphoreLeave($lockName);
@@ -205,6 +216,7 @@ class NavimowAccount extends IPSModule
         $this->WriteAttributeString('AccessToken', '');
         $this->WriteAttributeString('RefreshToken', '');
         $this->WriteAttributeInteger('TokenExpiresAtInternal', 0);
+        $this->WriteAttributeInteger('RefreshRetryCount', 0);
         $this->WriteAttributeString('OAuthState', '');
         $this->SetTimerInterval('RefreshToken', 0);
         $this->SetTimerInterval('PollStatus', 0);
@@ -304,9 +316,14 @@ class NavimowAccount extends IPSModule
         }
     }
 
-    private function createApiClient(): Navimow\ApiClient
+    protected function createApiClient(): Navimow\ApiClient
     {
         return new Navimow\ApiClient($this->ReadPropertyString('BaseUrl'));
+    }
+
+    protected function currentTimestamp(): int
+    {
+        return time();
     }
 
     private function hasValidConfiguration(): bool
@@ -338,24 +355,36 @@ class NavimowAccount extends IPSModule
             );
         }
 
-        $expiresAt = time() + $tokens['expiresIn'];
+        $expiresAt = $this->currentTimestamp() + $tokens['expiresIn'];
 
         $this->WriteAttributeString('AccessToken', $tokens['accessToken']);
         $this->WriteAttributeString('RefreshToken', $refreshToken);
         $this->WriteAttributeInteger('TokenExpiresAtInternal', $expiresAt);
+        $this->WriteAttributeInteger('RefreshRetryCount', 0);
         $this->SetValue('TokenExpiresAt', $expiresAt);
         $this->scheduleTokenRefresh();
     }
 
     private function scheduleTokenRefresh(): void
     {
+        $retryCount = $this->ReadAttributeInteger('RefreshRetryCount');
+        if ($retryCount > 0) {
+            $this->SetTimerInterval(
+                'RefreshToken',
+                $retryCount < self::TOKEN_REFRESH_RETRY_MAX_ATTEMPTS
+                    ? self::TOKEN_REFRESH_RETRY_DELAY_SECONDS * 1000
+                    : 0
+            );
+            return;
+        }
+
         $expiresAt = $this->ReadAttributeInteger('TokenExpiresAtInternal');
         if ($expiresAt <= 0 || $this->ReadAttributeString('RefreshToken') === '') {
             $this->SetTimerInterval('RefreshToken', 0);
             return;
         }
 
-        $remaining = $expiresAt - time();
+        $remaining = $expiresAt - $this->currentTimestamp();
         $delay = $remaining > (self::TOKEN_REFRESH_MARGIN_SECONDS * 2)
             ? $remaining - self::TOKEN_REFRESH_MARGIN_SECONDS
             : (int) floor($remaining / 2);
@@ -391,7 +420,7 @@ class NavimowAccount extends IPSModule
                 );
             }
 
-            $now = time();
+            $now = $this->currentTimestamp();
             $this->WriteAttributeString('DiscoveryCache', $encoded);
             $this->SetValue('LastDiscovery', $now);
             $this->SetValue('LastRestSuccess', $now);
@@ -421,7 +450,7 @@ class NavimowAccount extends IPSModule
                 );
             }
 
-            $now = time();
+            $now = $this->currentTimestamp();
             $this->SetValue('LastRestSuccess', $now);
             $this->setAuthenticationState(self::STATE_CONNECTED, false);
 
@@ -458,7 +487,7 @@ class NavimowAccount extends IPSModule
                 $deviceId
             );
 
-            $now = time();
+            $now = $this->currentTimestamp();
             $this->SetValue('LastRestSuccess', $now);
             $this->setAuthenticationState(self::STATE_CONNECTED, false);
 
@@ -502,7 +531,8 @@ class NavimowAccount extends IPSModule
     private function hasUsableAccessToken(): bool
     {
         return $this->ReadAttributeString('AccessToken') !== ''
-            && $this->ReadAttributeInteger('TokenExpiresAtInternal') > time();
+            && $this->ReadAttributeInteger('TokenExpiresAtInternal')
+                > $this->currentTimestamp();
     }
 
     private function assertApiSuccess(array $response): void
@@ -602,8 +632,10 @@ class NavimowAccount extends IPSModule
         );
     }
 
-    private function recordAuthenticationFailure(Throwable $exception): void
-    {
+    private function recordAuthenticationFailure(
+        Throwable $exception,
+        bool $allowTransportRetry
+    ): void {
         $this->SetTimerInterval('RefreshToken', 0);
         $this->SetValue(
             'RestErrorCount',
@@ -617,11 +649,30 @@ class NavimowAccount extends IPSModule
             if ($exception->getKind() === 'transport') {
                 $state = self::STATE_OFFLINE;
                 $reauthRequired = false;
+                if ($allowTransportRetry) {
+                    $retryCount = min(
+                        self::TOKEN_REFRESH_RETRY_MAX_ATTEMPTS,
+                        $this->ReadAttributeInteger('RefreshRetryCount') + 1
+                    );
+                    $this->WriteAttributeInteger(
+                        'RefreshRetryCount',
+                        $retryCount
+                    );
+                    $this->scheduleTokenRefresh();
+                } else {
+                    $this->WriteAttributeInteger('RefreshRetryCount', 0);
+                }
             } elseif ($exception->getKind() === 'configuration') {
                 $state = self::STATE_CONFIGURATION_ERROR;
+                $this->WriteAttributeInteger('RefreshRetryCount', 0);
             } elseif ($exception->getKind() === 'authentication') {
                 $state = self::STATE_REAUTH_REQUIRED;
+                $this->WriteAttributeInteger('RefreshRetryCount', 0);
+            } else {
+                $this->WriteAttributeInteger('RefreshRetryCount', 0);
             }
+        } else {
+            $this->WriteAttributeInteger('RefreshRetryCount', 0);
         }
 
         $this->setAuthenticationState($state, $reauthRequired);

@@ -30,6 +30,7 @@ class NavimowDevice extends IPSModule
     private const COMMAND_STATE_ALREADY_IN_STATE = 4;
     private const COMMAND_STATE_TIMED_OUT = 5;
     private const COMMAND_STATE_FAILED = 6;
+    private const COMMAND_STATE_WAITING_READ = 7;
 
     public function Create()
     {
@@ -81,9 +82,18 @@ class NavimowDevice extends IPSModule
 
     public function RefreshStatus(): string
     {
+        $result = $this->refreshStatusInternal();
+        return $result['message'];
+    }
+
+    private function refreshStatusInternal(): array
+    {
         $deviceId = trim($this->ReadPropertyString('DeviceId'));
         if ($deviceId === '') {
-            return 'Device ID is not configured.';
+            return [
+                'success' => false,
+                'message' => 'Device ID is not configured.',
+            ];
         }
 
         try {
@@ -108,21 +118,30 @@ class NavimowDevice extends IPSModule
 
             if (($result['status'] ?? null) !== 'ok') {
                 $this->applyReadFailure($result);
-                return $this->limitMessage(
-                    is_string($result['message'] ?? null)
-                        ? $result['message']
-                        : 'Status refresh failed.'
-                );
+                return [
+                    'success' => false,
+                    'message' => $this->limitMessage(
+                        is_string($result['message'] ?? null)
+                            ? $result['message']
+                            : 'Status refresh failed.'
+                    ),
+                ];
             }
 
             $this->applyStatusResult($result);
-            return 'Status refresh succeeded.';
+            return [
+                'success' => true,
+                'message' => 'Status refresh succeeded.',
+            ];
         } catch (Throwable $exception) {
             $this->applyReadFailure([
                 'message' => $exception->getMessage(),
                 'staleAfter' => 300,
             ]);
-            return $this->limitMessage($exception->getMessage());
+            return [
+                'success' => false,
+                'message' => $this->limitMessage($exception->getMessage()),
+            ];
         }
     }
 
@@ -178,7 +197,7 @@ class NavimowDevice extends IPSModule
             return 'Device ID is not configured.';
         }
 
-        $now = time();
+        $now = $this->currentTimestamp();
         $this->WriteAttributeBoolean('CommandActive', true);
         $this->WriteAttributeInteger('CommandCloudResult', 0);
         $this->WriteAttributeInteger(
@@ -284,15 +303,17 @@ class NavimowDevice extends IPSModule
             );
         }
 
-        $this->RefreshStatus();
+        $deadline = $this->ReadAttributeInteger('CommandDeadline');
+        $verificationStartedAt = $this->currentTimestamp();
+        if ($deadline <= 0 || $verificationStartedAt > $deadline) {
+            $this->timeoutCommandVerification();
+            return;
+        }
 
-        $statusBaseline = $this->ReadAttributeInteger(
-            'CommandStatusBaseline'
-        );
-        $lastStatusUpdate = $this->GetValue('LastStatusUpdate');
+        $readResult = $this->refreshStatusInternal();
+
         $vehicleState = $this->GetValue('VehicleState');
-        $verified = is_int($lastStatusUpdate)
-            && $lastStatusUpdate > $statusBaseline
+        $verified = $readResult['success'] === true
             && $vehicleState === self::VEHICLE_STATE_DOCKED;
 
         if ($verified) {
@@ -309,9 +330,13 @@ class NavimowDevice extends IPSModule
             return;
         }
 
+        if ($this->currentTimestamp() >= $deadline) {
+            $this->timeoutCommandVerification();
+            return;
+        }
+
         if (
-            is_int($lastStatusUpdate)
-            && $lastStatusUpdate > $statusBaseline
+            $readResult['success'] === true
             && $vehicleState === self::VEHICLE_STATE_DOCKING
         ) {
             $this->WriteAttributeInteger(
@@ -322,20 +347,11 @@ class NavimowDevice extends IPSModule
             return;
         }
 
-        $deadline = $this->ReadAttributeInteger('CommandDeadline');
-        if ($deadline > 0 && time() < $deadline) {
-            $this->scheduleNextCommandVerification();
-            return;
-        }
-
         $this->WriteAttributeInteger(
             'CommandVerificationState',
-            self::COMMAND_STATE_TIMED_OUT
+            self::COMMAND_STATE_WAITING_READ
         );
-        $this->finishCommand(
-            self::COMMAND_RESULT_VERIFICATION_TIMEOUT,
-            'Docked state was not confirmed before the verification timeout.'
-        );
+        $this->scheduleNextCommandVerification();
     }
 
     private function applyStatusResult(array $result): void
@@ -395,7 +411,11 @@ class NavimowDevice extends IPSModule
         }
 
         $lastUpdate = $this->GetValue('LastStatusUpdate');
-        if (is_int($lastUpdate) && $lastUpdate > 0 && time() - $lastUpdate > $staleAfter) {
+        if (
+            is_int($lastUpdate)
+            && $lastUpdate > 0
+            && $this->currentTimestamp() - $lastUpdate > $staleAfter
+        ) {
             $this->SetValue('Online', false);
         }
 
@@ -428,20 +448,46 @@ class NavimowDevice extends IPSModule
         }
     }
 
+    protected function currentTimestamp(): int
+    {
+        return time();
+    }
+
     private function scheduleNextCommandVerification(): void
     {
         $deadline = $this->ReadAttributeInteger('CommandDeadline');
-        if ($deadline > 0 && time() >= $deadline) {
+        $now = $this->currentTimestamp();
+        if ($deadline <= 0 || $now >= $deadline) {
             $this->SetTimerInterval('CommandVerification', 1);
             return;
         }
 
         $state = $this->ReadAttributeInteger('CommandVerificationState');
-        $interval = $state === self::COMMAND_STATE_RETURNING
+        $normalInterval = in_array(
+            $state,
+            [self::COMMAND_STATE_RETURNING, self::COMMAND_STATE_WAITING_READ],
+            true
+        )
             ? self::COMMAND_VERIFICATION_POLL_MILLISECONDS
             : self::COMMAND_VERIFICATION_DELAY_MILLISECONDS;
+        $remainingInterval = max(1, ($deadline - $now) * 1000);
 
-        $this->SetTimerInterval('CommandVerification', $interval);
+        $this->SetTimerInterval(
+            'CommandVerification',
+            min($normalInterval, $remainingInterval)
+        );
+    }
+
+    private function timeoutCommandVerification(): void
+    {
+        $this->WriteAttributeInteger(
+            'CommandVerificationState',
+            self::COMMAND_STATE_TIMED_OUT
+        );
+        $this->finishCommand(
+            self::COMMAND_RESULT_VERIFICATION_TIMEOUT,
+            'Docked state was not confirmed before the verification timeout.'
+        );
     }
 
     private function limitMessage(string $message): string
