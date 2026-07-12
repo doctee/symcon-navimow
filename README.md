@@ -3,7 +3,7 @@
 This repository is the installable distribution root for the Navimow module
 developed by the SAEF Navimow case study.
 
-Status: private pilot / REST MVP.
+Status: recovery-hardened private pilot / REST MVP.
 
 The module integrates Segway Navimow robotic mowers through the Navimow cloud
 REST API. It is not an official Segway Navimow product.
@@ -19,7 +19,9 @@ Implemented:
 - read-only status refresh;
 - battery, online and vehicle-state variables;
 - Dock command;
-- long-running read-only Dock verification.
+- long-running read-only Dock verification;
+- restart-safe Dock verification without command replay;
+- bounded token-refresh transport recovery.
 
 Not implemented:
 
@@ -106,15 +108,30 @@ Timing model:
 `Verification Timeout` means that `Docked` was not confirmed within the window.
 It does not prove that the mower physically failed.
 
+## Pilot Evidence
+
+The recovery-hardened pilot build has passed:
+
+- deterministic verification-timeout and final-deadline checks;
+- deterministic temporary and continuous REST read-failure checks;
+- deterministic token-refresh success, rejection and bounded retry checks;
+- a supervised Symcon restart while Dock verification was active;
+- passive scheduled token refresh with continued status polling;
+- three supervised Dock transitions without duplicate command delivery.
+
+Physical timeout and deliberate productive cloud failure were not induced.
+Those failure paths are covered by deterministic no-network tests.
+
 ## Known Limitations
 
 - The module uses an undocumented Navimow cloud API.
 - Status is REST-polled and may lag behind the official app.
 - Only one mower has direct live transition evidence in this case study.
-- Timeout, restart during active verification and cloud read failures need
-  additional pilot testing.
+- The repeated-operation evidence set is intentionally limited.
+- OAuth client configuration remains installation-specific.
 - Non-Dock commands remain deliberately disabled.
 - MQTT/WSS realtime data is reserved for a later phase.
+- The module is not approved for broad public release or the Symcon Store.
 
 ## Privacy
 
@@ -135,8 +152,8 @@ The engineering record for this MVP is maintained in:
 case-studies/navimow/
 ```
 
-The current release boundary is documented in:
+The current pilot release decision is documented in:
 
 ```text
-case-studies/navimow/31-rest-mvp-stabilization-and-release-check.md
+case-studies/navimow/48-private-pilot-release-review-and-tag-decision.md
 ```
