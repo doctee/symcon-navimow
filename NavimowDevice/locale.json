@@ -8,9 +8,11 @@
       "Refresh Status": "Status aktualisieren",
       "Pause": "Pausieren",
       "Pause the currently running mower?": "Den aktuell fahrenden Maeher pausieren?",
+      "Resume": "Fortsetzen",
+      "Resume mowing now? The mower may begin moving and cutting immediately.": "Maehen jetzt fortsetzen? Der Maeher kann sich sofort bewegen und schneiden.",
       "Dock": "Andocken",
       "Send the mower to the dock?": "Maeher zur Ladestation senden?",
-      "Pause and Dock are enabled. Resume, Stop and Start remain disabled.": "Pausieren und Andocken sind aktiviert. Fortsetzen, Stoppen und Starten bleiben deaktiviert."
+      "Pause, Resume and Dock are enabled. Stop and Start remain disabled.": "Pausieren, Fortsetzen und Andocken sind aktiviert. Stoppen und Starten bleiben deaktiviert."
     }
   }
 }

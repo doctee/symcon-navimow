@@ -30,13 +30,19 @@
     },
     {
       "type": "Button",
+      "caption": "Resume",
+      "confirm": "Resume mowing now? The mower may begin moving and cutting immediately.",
+      "onClick": "echo NAVDV_Resume($id);"
+    },
+    {
+      "type": "Button",
       "caption": "Dock",
       "confirm": "Send the mower to the dock?",
       "onClick": "echo NAVDV_Dock($id);"
     },
     {
       "type": "Label",
-      "caption": "Pause and Dock are enabled. Resume, Stop and Start remain disabled."
+      "caption": "Pause, Resume and Dock are enabled. Stop and Start remain disabled."
     }
   ]
 }

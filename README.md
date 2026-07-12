@@ -3,7 +3,7 @@
 This repository is the installable distribution root for the Navimow module
 developed by the SAEF Navimow case study.
 
-Status: recovery-hardened private pilot / REST MVP.
+Status: command-expanded private pilot / REST integration.
 
 The module integrates Segway Navimow robotic mowers through the Navimow cloud
 REST API. It is not an official Segway Navimow product.
@@ -18,7 +18,10 @@ Implemented:
 - mower discovery;
 - read-only status refresh;
 - battery, online and vehicle-state variables;
+- Pause command with fresh Running precondition;
+- Resume command with fresh Paused precondition;
 - Dock command;
+- bounded read-only Pause and Resume verification;
 - long-running read-only Dock verification;
 - restart-safe Dock verification without command replay;
 - bounded token-refresh transport recovery.
@@ -27,8 +30,6 @@ Not implemented:
 
 - Start;
 - Stop;
-- Pause;
-- Resume;
 - MQTT/WSS realtime updates;
 - location or map data;
 - Symcon Store packaging.
@@ -71,19 +72,24 @@ testing commands.
 
 ## Safe Command Use
 
-Pause and Dock are the only enabled mower commands.
+Pause, Resume and Dock are the only enabled mower commands.
 
-Before pressing Pause or Dock:
+Before pressing Pause, Resume or Dock:
 
 - keep the mower and docking station in sight;
 - keep the area clear;
 - keep the official Navimow app available;
 - be ready to use the physical stop control if needed.
 
+Resume can begin mower movement and cutting immediately. Confirm that the
+mower is visibly paused and that its movement path is clear before pressing
+Resume.
+
 The module sends one command per explicit user action and never retries that
-write. Pause first requires a current Running status read. After the cloud
-accepts either command, the module verifies progress with read-only status
-calls using a command-specific bounded deadline.
+write. Pause first requires a current Running status read. Resume first requires
+a current Paused status read. After the cloud accepts a command, the module
+verifies progress with read-only status calls using a command-specific bounded
+deadline.
 
 Expected command result flow:
 
@@ -120,6 +126,8 @@ The recovery-hardened pilot build has passed:
 - a supervised Symcon restart while Dock verification was active;
 - passive scheduled token refresh with continued status polling;
 - three supervised Dock transitions without duplicate command delivery.
+- one supervised private and one direct Symcon Pause transition;
+- one supervised private Resume transition.
 
 Physical timeout and deliberate productive cloud failure were not induced.
 Those failure paths are covered by deterministic no-network tests.
@@ -131,7 +139,7 @@ Those failure paths are covered by deterministic no-network tests.
 - Only one mower has direct live transition evidence in this case study.
 - The repeated-operation evidence set is intentionally limited.
 - OAuth client configuration remains installation-specific.
-- Non-Dock commands remain deliberately disabled.
+- Start and Stop remain deliberately disabled.
 - MQTT/WSS realtime data is reserved for a later phase.
 - The module is not approved for broad public release or the Symcon Store.
 

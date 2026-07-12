@@ -8,12 +8,13 @@ final class CommandContract
 {
     public const DOCK = 'Dock';
     public const PAUSE = 'Pause';
+    public const RESUME = 'Resume';
 
     public static function createPayload(
         string $command,
         string $deviceId
     ): array {
-        if (!in_array($command, [self::DOCK, self::PAUSE], true)) {
+        if (!in_array($command, [self::DOCK, self::PAUSE, self::RESUME], true)) {
             throw new \InvalidArgumentException(
                 'The requested mower command is not enabled.'
             );
@@ -24,15 +25,17 @@ final class CommandContract
             throw new \InvalidArgumentException('Device ID is invalid.');
         }
 
-        $execution = $command === self::DOCK
-            ? [
+        if ($command === self::DOCK) {
+            $execution = [
                 'command' => 'action.devices.commands.Dock',
                 'params' => new \stdClass(),
-            ]
-            : [
-                'command' => 'action.devices.commands.PauseUnpause',
-                'params' => ['on' => false],
             ];
+        } else {
+            $execution = [
+                'command' => 'action.devices.commands.PauseUnpause',
+                'params' => ['on' => $command === self::RESUME],
+            ];
+        }
 
         return [
             'commands' => [

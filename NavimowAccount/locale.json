@@ -15,7 +15,7 @@
       "Discover Devices": "Geraete suchen",
       "Reset Authentication": "Authentifizierung zuruecksetzen",
       "Clear all stored Navimow tokens?": "Alle gespeicherten Navimow-Tokens loeschen?",
-      "Discovery, status polling, Pause and Dock command transport are enabled.": "Discovery, Statusabfrage sowie Pausen- und Andock-Befehlstransport sind aktiviert."
+      "Discovery, status polling, Pause, Resume and Dock command transport are enabled.": "Discovery, Statusabfrage sowie Pausen-, Fortsetzungs- und Andock-Befehlstransport sind aktiviert."
     }
   }
 }
