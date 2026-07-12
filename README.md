@@ -3,7 +3,7 @@
 This repository is the installable distribution root for the Navimow module
 developed by the SAEF Navimow case study.
 
-Status: command-expanded private pilot / REST integration.
+Status: evidence-backed command-expanded private pilot / REST integration.
 
 The module integrates Segway Navimow robotic mowers through the Navimow cloud
 REST API. It is not an official Segway Navimow product.
@@ -118,16 +118,18 @@ It does not prove that the mower physically failed.
 
 ## Pilot Evidence
 
-The recovery-hardened pilot build has passed:
+The command-expanded pilot build has passed:
 
 - deterministic verification-timeout and final-deadline checks;
 - deterministic temporary and continuous REST read-failure checks;
 - deterministic token-refresh success, rejection and bounded retry checks;
 - a supervised Symcon restart while Dock verification was active;
 - passive scheduled token refresh with continued status polling;
-- three supervised Dock transitions without duplicate command delivery.
+- three supervised Dock transitions without duplicate command delivery;
 - one supervised private and one direct Symcon Pause transition;
-- one supervised private Resume transition.
+- one supervised private and one direct Symcon Resume transition;
+- update compatibility checks preserving all eight public variable identities;
+- archive continuity checks preserving all five operator-enabled logging streams.
 
 Physical timeout and deliberate productive cloud failure were not induced.
 Those failure paths are covered by deterministic no-network tests.
@@ -162,8 +164,8 @@ The engineering record for this MVP is maintained in:
 case-studies/navimow/
 ```
 
-The current pilot release decision is documented in:
+The command-expanded pilot release decision is documented in:
 
 ```text
-case-studies/navimow/48-private-pilot-release-review-and-tag-decision.md
+case-studies/navimow/73-resume-integration-review-and-stop-readiness.md
 ```
