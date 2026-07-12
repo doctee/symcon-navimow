@@ -24,13 +24,19 @@
     },
     {
       "type": "Button",
+      "caption": "Pause",
+      "confirm": "Pause the currently running mower?",
+      "onClick": "echo NAVDV_Pause($id);"
+    },
+    {
+      "type": "Button",
       "caption": "Dock",
       "confirm": "Send the mower to the dock?",
       "onClick": "echo NAVDV_Dock($id);"
     },
     {
       "type": "Label",
-      "caption": "Dock is the only enabled mower command."
+      "caption": "Pause and Dock are enabled. Resume, Stop and Start remain disabled."
     }
   ]
 }

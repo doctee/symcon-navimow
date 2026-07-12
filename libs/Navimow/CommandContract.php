@@ -7,12 +7,13 @@ namespace Navimow;
 final class CommandContract
 {
     public const DOCK = 'Dock';
+    public const PAUSE = 'Pause';
 
     public static function createPayload(
         string $command,
         string $deviceId
     ): array {
-        if ($command !== self::DOCK) {
+        if (!in_array($command, [self::DOCK, self::PAUSE], true)) {
             throw new \InvalidArgumentException(
                 'The requested mower command is not enabled.'
             );
@@ -23,16 +24,23 @@ final class CommandContract
             throw new \InvalidArgumentException('Device ID is invalid.');
         }
 
+        $execution = $command === self::DOCK
+            ? [
+                'command' => 'action.devices.commands.Dock',
+                'params' => new \stdClass(),
+            ]
+            : [
+                'command' => 'action.devices.commands.PauseUnpause',
+                'params' => ['on' => false],
+            ];
+
         return [
             'commands' => [
                 [
                     'devices' => [
                         ['id' => $deviceId],
                     ],
-                    'execution' => [
-                        'command' => 'action.devices.commands.Dock',
-                        'params' => new \stdClass(),
-                    ],
+                    'execution' => $execution,
                 ],
             ],
         ];

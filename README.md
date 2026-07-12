@@ -71,17 +71,19 @@ testing commands.
 
 ## Safe Command Use
 
-Dock is the only enabled mower command.
+Pause and Dock are the only enabled mower commands.
 
-Before pressing Dock:
+Before pressing Pause or Dock:
 
 - keep the mower and docking station in sight;
 - keep the area clear;
 - keep the official Navimow app available;
 - be ready to use the physical stop control if needed.
 
-The module sends one Dock command per user action. After the cloud accepts the
-command, the module verifies progress with read-only status calls.
+The module sends one command per explicit user action and never retries that
+write. Pause first requires a current Running status read. After the cloud
+accepts either command, the module verifies progress with read-only status
+calls using a command-specific bounded deadline.
 
 Expected command result flow:
 

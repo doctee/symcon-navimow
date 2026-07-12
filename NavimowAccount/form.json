@@ -66,7 +66,7 @@
     },
     {
       "type": "Label",
-      "caption": "Discovery, status polling and Dock command transport are enabled."
+      "caption": "Discovery, status polling, Pause and Dock command transport are enabled."
     }
   ]
 }

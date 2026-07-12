@@ -6,9 +6,11 @@
       "Display Name": "Anzeigename",
       "Enable debug payload variable": "Debug-Payload-Variable aktivieren",
       "Refresh Status": "Status aktualisieren",
+      "Pause": "Pausieren",
+      "Pause the currently running mower?": "Den aktuell fahrenden Maeher pausieren?",
       "Dock": "Andocken",
       "Send the mower to the dock?": "Maeher zur Ladestation senden?",
-      "Dock is the only enabled mower command.": "Andocken ist der einzige aktivierte Maeherbefehl."
+      "Pause and Dock are enabled. Resume, Stop and Start remain disabled.": "Pausieren und Andocken sind aktiviert. Fortsetzen, Stoppen und Starten bleiben deaktiviert."
     }
   }
 }
