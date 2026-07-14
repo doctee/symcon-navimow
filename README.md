@@ -17,6 +17,8 @@ Implemented:
 - token refresh;
 - mower discovery;
 - read-only status refresh;
+- adaptive 300-second docked and 60-second active-state polling;
+- bounded generic polling wake for optional local activity hints;
 - battery, online and vehicle-state variables;
 - Pause command with fresh Running precondition;
 - Resume command with fresh Paused precondition;
@@ -51,6 +53,22 @@ Recommended private-pilot procedure:
 5. Create or use the `Navimow Configurator`.
 6. Create a `Navimow Device` instance for the discovered mower.
 7. Press `Refresh Status` and confirm that status values update.
+
+The account defaults to a 300-second normal poll interval and a 60-second
+active poll interval. Successful `Running`, `Paused`, `Docking` and other known
+non-docked status reads select the active interval. A later `Docked` read
+returns to the normal interval without changing any device variable or archive
+setting.
+
+Optional local automation may call:
+
+```php
+NAVAC_WakePolling($accountInstanceID);
+```
+
+This opens a bounded three-minute fast-poll window and triggers one immediate
+read-only refresh. The caller supplies no mower state. Installation-specific
+sensors and ObjectIDs must remain outside this repository.
 
 For private Git installations, update through Symcon's module management after
 new commits are published to the repository.
@@ -138,6 +156,7 @@ Those failure paths are covered by deterministic no-network tests.
 
 - The module uses an undocumented Navimow cloud API.
 - Status is REST-polled and may lag behind the official app.
+- Optional external wake hints are installation-specific and not distributed.
 - Only one mower has direct live transition evidence in this case study.
 - The repeated-operation evidence set is intentionally limited.
 - OAuth client configuration remains installation-specific.

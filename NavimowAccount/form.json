@@ -27,6 +27,12 @@
       "minimum": 60
     },
     {
+      "type": "NumberSpinner",
+      "name": "ActivePollInterval",
+      "caption": "Active Poll Interval (seconds)",
+      "minimum": 60
+    },
+    {
       "type": "CheckBox",
       "name": "DebugPayloads",
       "caption": "Enable debug payload variable"
@@ -57,6 +63,11 @@
       "type": "Button",
       "caption": "Discover Devices",
       "onClick": "echo NAVAC_DiscoverDevices($id);"
+    },
+    {
+      "type": "Button",
+      "caption": "Wake Status Polling",
+      "onClick": "echo NAVAC_WakePolling($id);"
     },
     {
       "type": "Button",

@@ -18,6 +18,20 @@ class NavimowAccount extends IPSModule
     private const TOKEN_REFRESH_RETRY_DELAY_SECONDS = 60;
     private const TOKEN_REFRESH_RETRY_MAX_ATTEMPTS = 5;
     private const SEMAPHORE_TIMEOUT_MILLISECONDS = 5000;
+    private const WAKE_POLLING_WINDOW_SECONDS = 180;
+    private const MINIMUM_ACTIVITY_EVIDENCE_TTL_SECONDS = 900;
+    private const MAXIMUM_TRACKED_ACTIVE_DEVICES = 64;
+
+    private const VEHICLE_STATE_RUNNING = 1;
+    private const VEHICLE_STATE_DOCKED = 2;
+    private const VEHICLE_STATE_IDLE = 3;
+    private const VEHICLE_STATE_PAUSED = 4;
+    private const VEHICLE_STATE_DOCKING = 5;
+    private const VEHICLE_STATE_MAPPING = 6;
+    private const VEHICLE_STATE_LIFTED = 7;
+    private const VEHICLE_STATE_ERROR = 8;
+    private const VEHICLE_STATE_SOFTWARE_UPDATE = 9;
+    private const VEHICLE_STATE_SELF_CHECKING = 10;
 
     private const STATE_UNCONFIGURED = 0;
     private const STATE_AUTHORIZATION_PENDING = 1;
@@ -37,6 +51,7 @@ class NavimowAccount extends IPSModule
         $this->RegisterPropertyString('ClientSecret', '');
         $this->RegisterPropertyString('RedirectUri', 'http://localhost:1/callback');
         $this->RegisterPropertyInteger('PollInterval', 300);
+        $this->RegisterPropertyInteger('ActivePollInterval', 60);
         $this->RegisterPropertyBoolean('DebugPayloads', false);
 
         $this->RegisterAttributeString('AccessToken', '');
@@ -45,6 +60,8 @@ class NavimowAccount extends IPSModule
         $this->RegisterAttributeInteger('RefreshRetryCount', 0);
         $this->RegisterAttributeString('OAuthState', '');
         $this->RegisterAttributeString('DiscoveryCache', '[]');
+        $this->RegisterAttributeInteger('WakePollingUntil', 0);
+        $this->RegisterAttributeString('ActiveDeviceObservations', '[]');
 
         $this->RegisterTimer(
             'PollStatus',
@@ -74,6 +91,7 @@ class NavimowAccount extends IPSModule
         if (!$this->hasValidConfiguration()) {
             $this->SetTimerInterval('PollStatus', 0);
             $this->SetTimerInterval('RefreshToken', 0);
+            $this->clearAdaptivePollingState();
             $this->setAuthenticationState(self::STATE_CONFIGURATION_ERROR, true);
             return;
         }
@@ -81,6 +99,7 @@ class NavimowAccount extends IPSModule
         if ($this->ReadAttributeString('AccessToken') === '') {
             $this->SetTimerInterval('PollStatus', 0);
             $this->SetTimerInterval('RefreshToken', 0);
+            $this->clearAdaptivePollingState();
             $this->setAuthenticationState(self::STATE_AUTHORIZATION_PENDING, true);
             return;
         }
@@ -218,6 +237,7 @@ class NavimowAccount extends IPSModule
         $this->WriteAttributeInteger('TokenExpiresAtInternal', 0);
         $this->WriteAttributeInteger('RefreshRetryCount', 0);
         $this->WriteAttributeString('OAuthState', '');
+        $this->clearAdaptivePollingState();
         $this->SetTimerInterval('RefreshToken', 0);
         $this->SetTimerInterval('PollStatus', 0);
         $this->SetValue('TokenExpiresAt', 0);
@@ -233,14 +253,36 @@ class NavimowAccount extends IPSModule
     {
         if (!$this->hasUsableAccessToken()) {
             $this->SetTimerInterval('PollStatus', 0);
+            $this->clearAdaptivePollingState();
             return;
         }
 
-        $this->SendDataToChildren(json_encode([
-            'DataID' => self::DATA_INTERFACE,
-            'SchemaVersion' => self::MESSAGE_SCHEMA_VERSION,
-            'Function' => 'PollStatus',
-        ], JSON_THROW_ON_ERROR));
+        try {
+            $this->SendDataToChildren(json_encode([
+                'DataID' => self::DATA_INTERFACE,
+                'SchemaVersion' => self::MESSAGE_SCHEMA_VERSION,
+                'Function' => 'PollStatus',
+            ], JSON_THROW_ON_ERROR));
+        } finally {
+            $this->schedulePolling();
+        }
+    }
+
+    public function WakePolling(): string
+    {
+        if (!$this->hasUsableAccessToken()) {
+            $this->SetTimerInterval('PollStatus', 0);
+            return 'Status polling wake requires a usable access token.';
+        }
+
+        $this->WriteAttributeInteger(
+            'WakePollingUntil',
+            $this->currentTimestamp() + self::WAKE_POLLING_WINDOW_SECONDS
+        );
+        $this->schedulePolling();
+        $this->PollReadOnlyStatus();
+
+        return 'Status polling wake requested.';
     }
 
     public function ForwardData($JSONString)
@@ -400,7 +442,14 @@ class NavimowAccount extends IPSModule
             return;
         }
 
-        $interval = max(60, $this->ReadPropertyInteger('PollInterval'));
+        $normalInterval = max(60, $this->ReadPropertyInteger('PollInterval'));
+        $activeInterval = min(
+            $normalInterval,
+            max(60, $this->ReadPropertyInteger('ActivePollInterval'))
+        );
+        $interval = $this->isAdaptivePollingActive()
+            ? $activeInterval
+            : $normalInterval;
         $this->SetTimerInterval('PollStatus', $interval * 1000);
     }
 
@@ -453,6 +502,11 @@ class NavimowAccount extends IPSModule
             $now = $this->currentTimestamp();
             $this->SetValue('LastRestSuccess', $now);
             $this->setAuthenticationState(self::STATE_CONNECTED, false);
+            $this->recordDevicePollingState(
+                $deviceId,
+                (int) $status['vehicleState'],
+                $now
+            );
 
             return [
                 'status' => 'ok',
@@ -610,6 +664,107 @@ class NavimowAccount extends IPSModule
     private function staleAfterSeconds(): int
     {
         return max(300, max(60, $this->ReadPropertyInteger('PollInterval')) * 2);
+    }
+
+    private function recordDevicePollingState(
+        string $deviceId,
+        int $vehicleState,
+        int $observedAt
+    ): void {
+        $observations = $this->activeDeviceObservations();
+        $key = hash('sha256', $deviceId);
+        $wasActive = array_key_exists($key, $observations);
+
+        if ($this->isKnownActiveVehicleState($vehicleState)) {
+            $observations[$key] = $observedAt;
+        } else {
+            unset($observations[$key]);
+        }
+
+        if ($vehicleState === self::VEHICLE_STATE_DOCKED && $wasActive) {
+            $this->WriteAttributeInteger('WakePollingUntil', 0);
+        }
+
+        $this->WriteAttributeString(
+            'ActiveDeviceObservations',
+            json_encode($observations, JSON_THROW_ON_ERROR)
+        );
+        $this->schedulePolling();
+    }
+
+    private function isAdaptivePollingActive(): bool
+    {
+        if ($this->ReadAttributeInteger('WakePollingUntil') > $this->currentTimestamp()) {
+            return true;
+        }
+
+        return $this->activeDeviceObservations() !== [];
+    }
+
+    private function activeDeviceObservations(): array
+    {
+        $encoded = $this->ReadAttributeString('ActiveDeviceObservations');
+
+        try {
+            $decoded = json_decode($encoded, true, 8, JSON_THROW_ON_ERROR);
+        } catch (Throwable) {
+            $decoded = [];
+        }
+
+        if (!is_array($decoded)) {
+            $decoded = [];
+        }
+
+        $minimumTimestamp = $this->currentTimestamp()
+            - max(
+                self::MINIMUM_ACTIVITY_EVIDENCE_TTL_SECONDS,
+                max(60, $this->ReadPropertyInteger('PollInterval')) * 4
+            );
+        $observations = [];
+        foreach ($decoded as $key => $timestamp) {
+            if (
+                !is_string($key)
+                || preg_match('/^[a-f0-9]{64}$/', $key) !== 1
+                || !is_int($timestamp)
+                || $timestamp < $minimumTimestamp
+                || $timestamp > $this->currentTimestamp()
+            ) {
+                continue;
+            }
+
+            $observations[$key] = $timestamp;
+            if (count($observations) >= self::MAXIMUM_TRACKED_ACTIVE_DEVICES) {
+                break;
+            }
+        }
+
+        $normalized = json_encode($observations, JSON_THROW_ON_ERROR);
+        if ($normalized !== $encoded) {
+            $this->WriteAttributeString('ActiveDeviceObservations', $normalized);
+        }
+
+        return $observations;
+    }
+
+    private function isKnownActiveVehicleState(int $vehicleState): bool
+    {
+        return in_array($vehicleState, [
+            self::VEHICLE_STATE_RUNNING,
+            self::VEHICLE_STATE_IDLE,
+            self::VEHICLE_STATE_PAUSED,
+            self::VEHICLE_STATE_DOCKING,
+            self::VEHICLE_STATE_MAPPING,
+            self::VEHICLE_STATE_LIFTED,
+            self::VEHICLE_STATE_ERROR,
+            self::VEHICLE_STATE_SOFTWARE_UPDATE,
+            self::VEHICLE_STATE_SELF_CHECKING,
+        ], true);
+    }
+
+    private function clearAdaptivePollingState(): void
+    {
+        $this->WriteAttributeInteger('WakePollingUntil', 0);
+        $this->WriteAttributeString('ActiveDeviceObservations', '[]');
     }
 
     private function encodeResult(array $result): string
