@@ -149,6 +149,15 @@ The command-expanded pilot build has passed:
 - update compatibility checks preserving all eight public variable identities;
 - archive continuity checks preserving all five operator-enabled logging streams.
 
+Adaptive polling has additionally passed passive regular-operation evidence:
+
+- seven archived natural `Running -> Docking -> Docked` sequences;
+- correlation of departure and dock contact with the optional private power
+  hint;
+- capture of the short-lived `Docking` state;
+- return to the 300-second docked polling cadence;
+- no mower command or synthetic Navimow state write during observation.
+
 Physical timeout and deliberate productive cloud failure were not induced.
 Those failure paths are covered by deterministic no-network tests.
 
@@ -183,8 +192,8 @@ The engineering record for this MVP is maintained in:
 case-studies/navimow/
 ```
 
-The command-expanded pilot release decision is documented in:
+The adaptive-polling implementation and passive observation are documented in:
 
 ```text
-case-studies/navimow/73-resume-integration-review-and-stop-readiness.md
+case-studies/navimow/79-adaptive-polling-and-power-hint-implementation.md
 ```
