@@ -1,0 +1,13 @@
+{
+  "translations": {
+    "de": {
+      "Navimow MQTT Receive Probe": "Navimow MQTT Empfangsprobe",
+      "Temporary receive-only engineering probe. Do not use as a productive instance.": "Temporäre rein empfangende Engineering-Probe. Nicht als produktive Instanz verwenden.",
+      "Expected device ID": "Erwartete Geräte-ID",
+      "Arm evidence": "Evidenz aktivieren",
+      "Arm bounded receive-only evidence for 180 seconds?": "Begrenzte rein empfangende Evidenz für 180 Sekunden aktivieren?",
+      "Close evidence": "Evidenz schließen",
+      "Show sanitized report": "Sanitisierten Bericht anzeigen"
+    }
+  }
+}

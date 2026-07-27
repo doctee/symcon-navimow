@@ -1,0 +1,31 @@
+{
+  "elements": [
+    {
+      "type": "Label",
+      "caption": "Temporary receive-only engineering probe. Do not use as a productive instance."
+    },
+    {
+      "type": "PasswordTextBox",
+      "name": "ExpectedDeviceId",
+      "caption": "Expected device ID"
+    }
+  ],
+  "actions": [
+    {
+      "type": "Button",
+      "caption": "Arm evidence",
+      "confirm": "Arm bounded receive-only evidence for 180 seconds?",
+      "onClick": "echo NAVMQTTPROBE_ArmEvidence($id);"
+    },
+    {
+      "type": "Button",
+      "caption": "Close evidence",
+      "onClick": "echo NAVMQTTPROBE_CloseEvidence($id);"
+    },
+    {
+      "type": "Button",
+      "caption": "Show sanitized report",
+      "onClick": "echo NAVMQTTPROBE_GetEvidenceReport($id);"
+    }
+  ]
+}
