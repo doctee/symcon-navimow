@@ -591,11 +591,13 @@ class NavimowDevice extends IPSModule
             return;
         }
 
-        if (in_array(
-            $this->activeCommandKind(),
-            [self::COMMAND_PAUSE, self::COMMAND_RESUME],
-            true
-        )) {
+        if (
+            in_array(
+                $this->activeCommandKind(),
+                [self::COMMAND_PAUSE, self::COMMAND_RESUME],
+                true
+            )
+        ) {
             $startedAt = $this->ReadAttributeInteger('CommandStartedAt');
             $elapsed = max(0, $now - $startedAt);
             $nextOffset = self::SHORT_VERIFICATION_TIMEOUT_SECONDS;
@@ -647,11 +649,13 @@ class NavimowDevice extends IPSModule
     private function activeCommandKind(): int
     {
         $commandKind = $this->ReadAttributeInteger('CommandKind');
-        if (in_array(
-            $commandKind,
-            [self::COMMAND_PAUSE, self::COMMAND_RESUME],
-            true
-        )) {
+        if (
+            in_array(
+                $commandKind,
+                [self::COMMAND_PAUSE, self::COMMAND_RESUME],
+                true
+            )
+        ) {
             return $commandKind;
         }
 

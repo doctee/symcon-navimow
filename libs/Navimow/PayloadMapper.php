@@ -130,8 +130,7 @@ final class PayloadMapper
     public static function mapStatus(
         array $payload,
         ?string $deviceId = null
-    ): array
-    {
+    ): array {
         $device = self::findDevice($payload, $deviceId);
         $sourceState = isset($device['vehicleState']) && is_string($device['vehicleState'])
             ? $device['vehicleState']
@@ -152,8 +151,7 @@ final class PayloadMapper
     public static function mapCommandResult(
         array $payload,
         string $deviceId
-    ): array
-    {
+    ): array {
         $commands = $payload['data']['payload']['commands'] ?? null;
         if (!is_array($commands) || $commands === []) {
             throw new \UnexpectedValueException(

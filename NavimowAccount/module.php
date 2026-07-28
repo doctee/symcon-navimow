@@ -272,6 +272,7 @@ class NavimowAccount extends IPSModule
     {
         if (!$this->hasUsableAccessToken()) {
             $this->SetTimerInterval('PollStatus', 0);
+            $this->clearAdaptivePollingState();
             return 'Status polling wake requires a usable access token.';
         }
 
@@ -680,6 +681,7 @@ class NavimowAccount extends IPSModule
         } else {
             unset($observations[$key]);
         }
+        $observations = $this->limitActiveDeviceObservations($observations);
 
         if ($vehicleState === self::VEHICLE_STATE_DOCKED && $wasActive) {
             $this->WriteAttributeInteger('WakePollingUntil', 0);
@@ -733,15 +735,37 @@ class NavimowAccount extends IPSModule
             }
 
             $observations[$key] = $timestamp;
-            if (count($observations) >= self::MAXIMUM_TRACKED_ACTIVE_DEVICES) {
-                break;
-            }
         }
+
+        $observations = $this->limitActiveDeviceObservations($observations);
 
         $normalized = json_encode($observations, JSON_THROW_ON_ERROR);
         if ($normalized !== $encoded) {
             $this->WriteAttributeString('ActiveDeviceObservations', $normalized);
         }
+
+        return $observations;
+    }
+
+    private function limitActiveDeviceObservations(array $observations): array
+    {
+        uksort(
+            $observations,
+            static function (string $left, string $right) use ($observations): int {
+                $timestampOrder = $observations[$right] <=> $observations[$left];
+
+                return $timestampOrder !== 0
+                    ? $timestampOrder
+                    : strcmp($left, $right);
+            }
+        );
+        $observations = array_slice(
+            $observations,
+            0,
+            self::MAXIMUM_TRACKED_ACTIVE_DEVICES,
+            true
+        );
+        ksort($observations);
 
         return $observations;
     }
