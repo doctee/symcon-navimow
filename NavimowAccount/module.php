@@ -44,6 +44,7 @@ class NavimowAccount extends IPSModule
     private const MQTT_OWNERSHIP_FORMAT_VERSION = 2;
     private const MQTT_KEEP_ALIVE_SECONDS = 60;
     private const MQTT_LIFECYCLE_INITIAL_DELAY_SECONDS = 5;
+    private const MQTT_KERNEL_RECONCILIATION_DELAY_SECONDS = 15;
     private const MQTT_LIFECYCLE_OBSERVATION_SECONDS = 60;
     private const MQTT_LIFECYCLE_HEALTHY_RESET_SECONDS = 900;
     private const MQTT_RECONNECT_DELAYS_SECONDS = [60, 300, 900];
@@ -114,6 +115,7 @@ class NavimowAccount extends IPSModule
         $this->RegisterAttributeString('MqttErrorHistory', '[]');
         $this->RegisterAttributeString('MqttShadowState', '{}');
         $this->RegisterAttributeString('MqttPendingReconciliation', '{}');
+        $this->registerKernelStartMessage();
 
         $this->RegisterTimer(
             'PollStatus',
@@ -186,6 +188,22 @@ class NavimowAccount extends IPSModule
             false
         );
         $this->scheduleMqttStartupIfReady();
+    }
+
+    public function MessageSink(
+        $TimeStamp,
+        $SenderID,
+        $Message,
+        $Data
+    ) {
+        if (
+            $SenderID !== 0
+            || $Message !== $this->kernelStartedMessageId()
+        ) {
+            return;
+        }
+
+        $this->scheduleMqttKernelReconciliation();
     }
 
     public function GetAuthorizationUrl(): string
@@ -529,9 +547,11 @@ class NavimowAccount extends IPSModule
                         'authentication-restored',
                         'connection-attempt',
                         'connection-failed',
+                        'core-resumed',
                         'core-disconnected',
                         'disabled',
                         'healthy',
+                        'kernel-start-observed',
                         'manual-disconnect',
                         'reconnect-exhausted',
                         'restart-scheduled',
@@ -546,6 +566,15 @@ class NavimowAccount extends IPSModule
                 ),
                 'reconnectAttempt' => $this->mqttDiagnosticInteger(
                     $lifecycle['reconnectAttempt'] ?? null
+                ),
+                'kernelStartObservedAt' => $this->mqttDiagnosticInteger(
+                    $lifecycle['kernelStartObservedAt'] ?? null
+                ),
+                'kernelStartReconciledAt' => $this->mqttDiagnosticInteger(
+                    $lifecycle['kernelStartReconciledAt'] ?? null
+                ),
+                'kernelStartTime' => $this->mqttDiagnosticInteger(
+                    $lifecycle['kernelStartTime'] ?? null
                 ),
             ],
             'statistics' => [
@@ -569,6 +598,9 @@ class NavimowAccount extends IPSModule
                 ),
                 'credentialRotations' => $this->mqttDiagnosticInteger(
                     $statistics['credentialRotations'] ?? null
+                ),
+                'coreResumeObservations' => $this->mqttDiagnosticInteger(
+                    $statistics['coreResumeObservations'] ?? null
                 ),
                 'received' => $this->mqttDiagnosticInteger(
                     $statistics['received'] ?? null
@@ -853,14 +885,32 @@ class NavimowAccount extends IPSModule
 
     private function processMqttLifecycleLocked(): void
     {
+        $lifecycle = $this->mqttLifecycle();
+        $now = $this->currentTimestamp();
+        $scheduledKind = is_string(
+            $lifecycle['scheduledKind'] ?? null
+        ) ? $lifecycle['scheduledKind'] : '';
+        $nextAttemptAt = is_int(
+            $lifecycle['nextAttemptAt'] ?? null
+        ) ? $lifecycle['nextAttemptAt'] : 0;
+        if ($scheduledKind === 'kernel-reconcile') {
+            if ($nextAttemptAt > $now) {
+                $this->SetTimerInterval(
+                    'MqttLifecycle',
+                    max(1, $nextAttemptAt - $now) * 1000
+                );
+                return;
+            }
+            $this->processMqttKernelReconciliationLocked($now);
+            return;
+        }
+
         $validation = $this->inspectMqttShadowConfiguration();
         if (!($validation['valid'] ?? false)) {
             return;
         }
 
         $topology = $this->mqttTopology();
-        $lifecycle = $this->mqttLifecycle();
-        $now = $this->currentTimestamp();
         $mqttStatus = $this->mqttCoreStatus(
             $topology['mqttInstanceId']
         );
@@ -1093,6 +1143,20 @@ class NavimowAccount extends IPSModule
     protected function currentTimestamp(): int
     {
         return time();
+    }
+
+    protected function currentKernelStartTime(): int
+    {
+        $getKernelStartTime = $this->runtimeFunctionName(
+            'IPS',
+            'GetKernelStartTime'
+        );
+        if (!is_callable($getKernelStartTime)) {
+            return 0;
+        }
+        $timestamp = $getKernelStartTime();
+
+        return is_int($timestamp) && $timestamp > 0 ? $timestamp : 0;
     }
 
     private function hasValidConfiguration(): bool
@@ -2049,6 +2113,185 @@ class NavimowAccount extends IPSModule
         );
     }
 
+    private function registerKernelStartMessage(): void
+    {
+        $registerMessage = [$this, 'Register' . 'Message'];
+        if (!is_callable($registerMessage)) {
+            return;
+        }
+        $registerMessage(0, $this->kernelStartedMessageId());
+    }
+
+    private function kernelStartedMessageId(): int
+    {
+        if (!defined('IPS_KERNELSTARTED')) {
+            return 10001;
+        }
+        $messageId = constant('IPS_KERNELSTARTED');
+
+        return is_int($messageId) ? $messageId : 10001;
+    }
+
+    private function scheduleMqttKernelReconciliation(): void
+    {
+        $kernelStartTime = $this->currentKernelStartTime();
+        if ($kernelStartTime <= 0) {
+            return;
+        }
+
+        $lifecycle = $this->mqttLifecycle();
+        if (
+            ($lifecycle['kernelStartTime'] ?? null) === $kernelStartTime
+            && (
+                ($lifecycle['scheduledKind'] ?? null)
+                    === 'kernel-reconcile'
+                || $this->mqttDiagnosticInteger(
+                    $lifecycle['kernelStartReconciledAt'] ?? null
+                ) > 0
+            )
+        ) {
+            return;
+        }
+
+        $now = $this->currentTimestamp();
+        $lifecycle['formatVersion'] = 1;
+        $lifecycle['kernelStartTime'] = $kernelStartTime;
+        $lifecycle['kernelStartObservedAt'] = $now;
+        $lifecycle['kernelStartReconciledAt'] = 0;
+        $lifecycle['scheduledKind'] = 'kernel-reconcile';
+        $lifecycle['nextAttemptAt'] =
+            $now + self::MQTT_KERNEL_RECONCILIATION_DELAY_SECONDS;
+        $lifecycle['lastTransitionReason'] = 'kernel-start-observed';
+        $this->writeMqttLifecycle($lifecycle);
+        $this->SetTimerInterval(
+            'MqttLifecycle',
+            self::MQTT_KERNEL_RECONCILIATION_DELAY_SECONDS * 1000
+        );
+    }
+
+    private function processMqttKernelReconciliationLocked(int $now): void
+    {
+        if (!$this->ReadPropertyBoolean('EnableMqttShadow')) {
+            $this->reconcileDisabledMqttAfterKernelStart($now);
+            return;
+        }
+        if (!$this->hasUsableAccessToken()) {
+            if (
+                $this->ReadAttributeString('MqttOwnershipRegistry') !== '{}'
+            ) {
+                try {
+                    $this->disconnectOwnedMqttTransport();
+                } catch (Throwable) {
+                    $this->appendMqttError(
+                        'credential-cleanup-skipped'
+                    );
+                    $this->markMqttKernelReconciled($now);
+                    $this->setMqttLifecycleState(
+                        self::MQTT_LIFECYCLE_CONFIGURATION_ERROR
+                    );
+                    return;
+                }
+            }
+            $this->markMqttKernelReconciled($now);
+            $this->setMqttLifecycleState(
+                self::MQTT_LIFECYCLE_WAITING_FOR_AUTHENTICATION
+            );
+            return;
+        }
+
+        $validation = $this->inspectMqttShadowConfiguration();
+        if (!($validation['valid'] ?? false)) {
+            $this->markMqttKernelReconciled($now);
+            $this->setMqttLifecycleState(
+                self::MQTT_LIFECYCLE_CONFIGURATION_ERROR
+            );
+            return;
+        }
+
+        $topology = $this->mqttTopology();
+        if ($this->mqttCoreIsHealthy($topology)) {
+            $this->adoptMqttCoreResume($now);
+            return;
+        }
+        if ($this->mqttTransportIsCredentialFree($topology)) {
+            $this->markMqttKernelReconciled($now);
+            $this->resetMqttReconnectEpisode();
+            $this->scheduleMqttLifecycleAttempt(
+                'initial',
+                self::MQTT_LIFECYCLE_INITIAL_DELAY_SECONDS,
+                'restart-scheduled'
+            );
+            return;
+        }
+
+        $this->recordMqttStatistic('unexpectedDisconnects');
+        $this->appendMqttError('unexpected-disconnect');
+        try {
+            $this->disconnectOwnedMqttTransport();
+        } catch (Throwable) {
+            $this->appendMqttError('credential-cleanup-skipped');
+            $this->markMqttKernelReconciled($now);
+            $this->setMqttLifecycleState(
+                self::MQTT_LIFECYCLE_CONFIGURATION_ERROR
+            );
+            return;
+        }
+        $this->markMqttKernelReconciled($now);
+        $this->scheduleMqttReconnect('core-disconnected');
+    }
+
+    private function reconcileDisabledMqttAfterKernelStart(int $now): void
+    {
+        if ($this->ReadAttributeString('MqttOwnershipRegistry') !== '{}') {
+            try {
+                $topology = $this->mqttTopology();
+                $this->assertMqttOwnership($topology);
+                if (!$this->mqttTransportIsCredentialFree($topology)) {
+                    $this->disconnectOwnedMqttTransport();
+                }
+            } catch (Throwable) {
+                $this->appendMqttError('credential-cleanup-skipped');
+                $this->markMqttKernelReconciled($now);
+                $this->setMqttLifecycleState(
+                    self::MQTT_LIFECYCLE_CONFIGURATION_ERROR
+                );
+                return;
+            }
+        }
+
+        $this->markMqttKernelReconciled($now);
+        $this->setMqttLifecycleState(
+            self::MQTT_LIFECYCLE_DISABLED,
+            'disabled'
+        );
+    }
+
+    private function markMqttKernelReconciled(int $timestamp): void
+    {
+        $lifecycle = $this->mqttLifecycle();
+        $lifecycle['formatVersion'] = 1;
+        $lifecycle['kernelStartReconciledAt'] = $timestamp;
+        $lifecycle['scheduledKind'] = '';
+        $lifecycle['nextAttemptAt'] = 0;
+        $lifecycle['connectionPending'] = false;
+        $this->writeMqttLifecycle($lifecycle);
+        $this->SetTimerInterval('MqttLifecycle', 0);
+    }
+
+    private function adoptMqttCoreResume(int $timestamp): void
+    {
+        $this->markMqttKernelReconciled($timestamp);
+        $lifecycle = $this->mqttLifecycle();
+        $lifecycle['healthySince'] = $timestamp;
+        $this->writeMqttLifecycle($lifecycle);
+        $this->recordMqttStatistic('coreResumeObservations');
+        $this->setMqttLifecycleState(
+            self::MQTT_LIFECYCLE_SHADOW_ACTIVE,
+            'core-resumed'
+        );
+        $this->scheduleMqttObservation();
+    }
+
     private function scheduleMqttCredentialRotation(): void
     {
         if (
@@ -2270,6 +2513,17 @@ class NavimowAccount extends IPSModule
             && $headers === []
             && ($topology['mqttConfiguration']['UserName'] ?? null) === ''
             && ($topology['mqttConfiguration']['Password'] ?? null) === '';
+    }
+
+    private function mqttCoreIsHealthy(array $topology): bool
+    {
+        return $this->mqttCoreStatus($topology['mqttInstanceId']) === 102
+            && $this->mqttCoreStatus(
+                $topology['webSocketInstanceId']
+            ) === 102
+            && (
+                $topology['webSocketConfiguration']['Active'] ?? null
+            ) === true;
     }
 
     private function mqttCoreStatus(int $instanceId): int
