@@ -43,6 +43,7 @@ class NavimowAccount extends IPSModule
     private const MQTT_COMPARISON_MAX_AGE_SECONDS = 300;
     private const MQTT_OWNERSHIP_FORMAT_VERSION = 2;
     private const MQTT_KEEP_ALIVE_SECONDS = 60;
+    private const MQTT_DIAGNOSTIC_ATTRIBUTE_MAX_BYTES = 262144;
     private const MQTT_LIFECYCLE_DISABLED = 'Disabled';
     private const MQTT_LIFECYCLE_WAITING_FOR_AUTHENTICATION =
         'WaitingForAuthentication';
@@ -439,6 +440,141 @@ class NavimowAccount extends IPSModule
         return $this->encodeResult(
             $this->inspectMqttAdoptionCandidate()
         );
+    }
+
+    public function GetMqttDiagnostics(): string
+    {
+        $lifecycle = $this->decodeMqttDiagnosticAttribute(
+            'MqttLifecycleRegistry'
+        );
+        $statistics = $this->decodeMqttDiagnosticAttribute(
+            'MqttStatistics'
+        );
+        $errors = $this->mqttDiagnosticErrors();
+        $shadow = $this->decodeMqttDiagnosticAttribute(
+            'MqttShadowState'
+        );
+        $pending = $this->decodeMqttDiagnosticAttribute(
+            'MqttPendingReconciliation'
+        );
+        $validation = $this->inspectMqttShadowConfiguration();
+
+        return $this->encodeResult([
+            'formatVersion' => 1,
+            'featureEnabled' =>
+                $this->ReadPropertyBoolean('EnableMqttShadow'),
+            'configurationStatus' => $this->mqttDiagnosticCode(
+                $validation['status'] ?? null,
+                ['disabled', 'ready', 'configuration-invalid']
+            ),
+            'lifecycle' => [
+                'state' => $this->mqttDiagnosticCode(
+                    $lifecycle['state'] ?? null,
+                    [
+                        self::MQTT_LIFECYCLE_DISABLED,
+                        self::MQTT_LIFECYCLE_WAITING_FOR_AUTHENTICATION,
+                        self::MQTT_LIFECYCLE_WAITING_FOR_PAIRING,
+                        self::MQTT_LIFECYCLE_READY,
+                        self::MQTT_LIFECYCLE_CONFIGURING,
+                        self::MQTT_LIFECYCLE_CONNECTING,
+                        self::MQTT_LIFECYCLE_SHADOW_ACTIVE,
+                        self::MQTT_LIFECYCLE_DISCONNECTED,
+                        self::MQTT_LIFECYCLE_REAUTHENTICATION_REQUIRED,
+                        self::MQTT_LIFECYCLE_CONFIGURATION_ERROR,
+                    ]
+                ),
+                'stateChangedAt' => $this->mqttDiagnosticInteger(
+                    $lifecycle['stateChangedAt'] ?? null
+                ),
+                'lastResult' => $this->mqttDiagnosticCode(
+                    $lifecycle['lastResult'] ?? null,
+                    [
+                        'pairing-rejected',
+                        'oversized-envelope',
+                        'busy',
+                        'retained-rejected',
+                        'accepted',
+                        'reconciliation-queued',
+                        'invalid-input',
+                    ]
+                ),
+                'lastResultAt' => $this->mqttDiagnosticInteger(
+                    $lifecycle['lastResultAt'] ?? null
+                ),
+                'lastCoreStatus' => $this->mqttDiagnosticInteger(
+                    $lifecycle['lastCoreStatus'] ?? null
+                ),
+                'observedAt' => $this->mqttDiagnosticInteger(
+                    $lifecycle['observedAt'] ?? null
+                ),
+            ],
+            'statistics' => [
+                'connectionAttempts' => $this->mqttDiagnosticInteger(
+                    $statistics['connectionAttempts'] ?? null
+                ),
+                'received' => $this->mqttDiagnosticInteger(
+                    $statistics['received'] ?? null
+                ),
+                'accepted' => $this->mqttDiagnosticInteger(
+                    $statistics['accepted'] ?? null
+                ),
+                'rejected' => $this->mqttDiagnosticInteger(
+                    $statistics['rejected'] ?? null
+                ),
+                'reconciliationAttempts' =>
+                    $this->mqttDiagnosticInteger(
+                        $statistics['reconciliationAttempts'] ?? null
+                    ),
+                'comparisonMatches' => $this->mqttDiagnosticInteger(
+                    $statistics['comparisonMatches'] ?? null
+                ),
+                'comparisonMismatches' => $this->mqttDiagnosticInteger(
+                    $statistics['comparisonMismatches'] ?? null
+                ),
+                'comparisonStale' => $this->mqttDiagnosticInteger(
+                    $statistics['comparisonStale'] ?? null
+                ),
+                'lastConnectionAttemptAt' =>
+                    $this->mqttDiagnosticInteger(
+                        $statistics['lastConnectionAttemptAt'] ?? null
+                    ),
+                'lastReceivedAt' => $this->mqttDiagnosticInteger(
+                    $statistics['lastReceivedAt'] ?? null
+                ),
+                'lastReconciliationAt' =>
+                    $this->mqttDiagnosticInteger(
+                        $statistics['lastReconciliationAt'] ?? null
+                    ),
+                'lastComparisonAt' => $this->mqttDiagnosticInteger(
+                    $statistics['lastComparisonAt'] ?? null
+                ),
+                'lastReconciliationResult' =>
+                    $this->mqttDiagnosticCode(
+                        $statistics['lastReconciliationResult'] ?? null,
+                        [
+                            'target-not-discovered',
+                            'rest-wake-sent',
+                            'handoff-failed',
+                        ]
+                    ),
+                'lastComparisonResult' => $this->mqttDiagnosticCode(
+                    $statistics['lastComparisonResult'] ?? null,
+                    ['match', 'mismatch', 'stale']
+                ),
+            ],
+            'errors' => $errors,
+            'shadow' => [
+                'trackedDeviceCount' => $this->mqttDiagnosticCount(
+                    $shadow['devices'] ?? null,
+                    self::MQTT_MAX_TRACKED_DEVICES
+                ),
+                'pendingReconciliationCount' =>
+                    $this->mqttDiagnosticCount(
+                        $pending['entries'] ?? null,
+                        self::MQTT_MAX_TRACKED_DEVICES
+                    ),
+            ],
+        ]);
     }
 
     public function AdoptMqttShadowChain(): string
@@ -2242,6 +2378,88 @@ class NavimowAccount extends IPSModule
         );
 
         return is_array($decoded) ? $decoded : $fallback;
+    }
+
+    private function decodeMqttDiagnosticAttribute(string $ident): array
+    {
+        $encoded = $this->ReadAttributeString($ident);
+        if (
+            strlen($encoded) > self::MQTT_DIAGNOSTIC_ATTRIBUTE_MAX_BYTES
+        ) {
+            return [];
+        }
+        $decoded = json_decode($encoded, true, 16);
+
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    private function mqttDiagnosticInteger(mixed $value): int
+    {
+        return is_int($value) && $value >= 0 ? $value : 0;
+    }
+
+    private function mqttDiagnosticCode(
+        mixed $value,
+        array $allowed
+    ): string {
+        if ($value === null || $value === '') {
+            return 'none';
+        }
+
+        return is_string($value) && in_array($value, $allowed, true)
+            ? $value
+            : 'unknown';
+    }
+
+    private function mqttDiagnosticCount(mixed $value, int $limit): int
+    {
+        return is_array($value) ? min(count($value), $limit) : 0;
+    }
+
+    private function mqttDiagnosticErrors(): array
+    {
+        $history = $this->decodeMqttDiagnosticAttribute(
+            'MqttErrorHistory'
+        );
+        if (!array_is_list($history)) {
+            $history = [];
+        }
+        $allowed = [
+            'adoption-failed',
+            'connection-failed',
+            'connection-rollback-failed',
+            'credential-cleanup-skipped',
+            'disconnect-failed',
+            'invalid-input',
+            'reconciliation-handoff-failed',
+        ];
+        $valid = [];
+        foreach (
+            array_slice($history, -self::MQTT_MAX_ERROR_ENTRIES) as $entry
+        ) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            $reason = $this->mqttDiagnosticCode(
+                $entry['reason'] ?? null,
+                $allowed
+            );
+            $at = $this->mqttDiagnosticInteger($entry['at'] ?? null);
+            if ($reason === 'none' || $reason === 'unknown' || $at === 0) {
+                continue;
+            }
+            $valid[] = [
+                'reason' => $reason,
+                'at' => $at,
+            ];
+        }
+        $latest = $valid === [] ? null : $valid[array_key_last($valid)];
+
+        return [
+            'count' => count($valid),
+            'latestReason' => $latest['reason'] ?? 'none',
+            'latestAt' => $latest['at'] ?? 0,
+        ];
     }
 
     private function encodeResult(array $result): string

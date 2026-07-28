@@ -19,6 +19,7 @@
       "Discover Devices": "Geraete suchen",
       "Wake Status Polling": "Statusabfrage aufwecken",
       "Validate MQTT Adoption Candidate": "MQTT-Uebernahmekandidat pruefen",
+      "Show MQTT Diagnostics": "MQTT-Diagnose anzeigen",
       "Adopt MQTT Shadow Chain": "MQTT-Schattenkette uebernehmen",
       "Adopt the configured inactive and credential-empty MQTT chain?": "Die konfigurierte inaktive und zugangsdatenfreie MQTT-Kette uebernehmen?",
       "Connect MQTT Shadow": "MQTT-Schatten verbinden",
