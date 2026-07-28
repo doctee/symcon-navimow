@@ -78,6 +78,15 @@ final class ApiClient
         );
     }
 
+    public function getMqttUserInfo(string $accessToken): array
+    {
+        return $this->authorizedRequest(
+            'GET',
+            '/openapi/mqtt/userInfo/get/v2',
+            $accessToken
+        );
+    }
+
     public function sendCommands(string $accessToken, array $payload): array
     {
         return $this->authorizedRequest(

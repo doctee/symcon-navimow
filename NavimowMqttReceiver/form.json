@@ -1,0 +1,16 @@
+{
+  "elements": [
+    {
+      "type": "SelectInstance",
+      "name": "AccountInstanceId",
+      "caption": "Navimow Account",
+      "validModules": [
+        "{3C2693FC-1068-4A63-856B-8AC0376556CC}"
+      ]
+    },
+    {
+      "type": "Label",
+      "caption": "MQTT shadow handoff remains inactive until Account pairing is implemented."
+    }
+  ]
+}

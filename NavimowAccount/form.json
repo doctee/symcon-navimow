@@ -36,6 +36,23 @@
       "type": "CheckBox",
       "name": "DebugPayloads",
       "caption": "Enable debug payload variable"
+    },
+    {
+      "type": "CheckBox",
+      "name": "EnableMqttShadow",
+      "caption": "Enable experimental MQTT shadow"
+    },
+    {
+      "type": "SelectInstance",
+      "name": "MqttReceiverInstanceId",
+      "caption": "Navimow MQTT Receiver",
+      "validModules": [
+        "{1B9960A2-A30C-D846-DF55-800F583AA812}"
+      ]
+    },
+    {
+      "type": "Label",
+      "caption": "MQTT shadow is optional and internal. REST remains authoritative."
     }
   ],
   "actions": [
@@ -68,6 +85,29 @@
       "type": "Button",
       "caption": "Wake Status Polling",
       "onClick": "echo NAVAC_WakePolling($id);"
+    },
+    {
+      "type": "Button",
+      "caption": "Validate MQTT Adoption Candidate",
+      "onClick": "echo NAVAC_ValidateMqttAdoptionCandidate($id);"
+    },
+    {
+      "type": "Button",
+      "caption": "Adopt MQTT Shadow Chain",
+      "confirm": "Adopt the configured inactive and credential-empty MQTT chain?",
+      "onClick": "echo NAVAC_AdoptMqttShadowChain($id);"
+    },
+    {
+      "type": "Button",
+      "caption": "Connect MQTT Shadow",
+      "confirm": "Retrieve fresh private MQTT credentials and start exactly one connection attempt?",
+      "onClick": "echo NAVAC_ConnectMqttShadow($id);"
+    },
+    {
+      "type": "Button",
+      "caption": "Disconnect MQTT Shadow",
+      "confirm": "Deactivate the owned WebSocket and clear its private MQTT credentials?",
+      "onClick": "echo NAVAC_DisconnectMqttShadow($id);"
     },
     {
       "type": "Button",

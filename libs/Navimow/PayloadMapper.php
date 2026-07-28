@@ -137,7 +137,7 @@ final class PayloadMapper
             : null;
 
         $vehicleState = $sourceState !== null
-            ? (self::VEHICLE_STATE_MAP[$sourceState] ?? self::VEHICLE_STATE_UNKNOWN)
+            ? self::mapVehicleStateName($sourceState)
             : self::VEHICLE_STATE_UNKNOWN;
 
         return [
@@ -146,6 +146,12 @@ final class PayloadMapper
             'batteryLevel' => self::mapBatteryLevel($device),
             'online' => $vehicleState === self::VEHICLE_STATE_OFFLINE ? false : null,
         ];
+    }
+
+    public static function mapVehicleStateName(string $sourceState): int
+    {
+        return self::VEHICLE_STATE_MAP[$sourceState]
+            ?? self::VEHICLE_STATE_UNKNOWN;
     }
 
     public static function mapCommandResult(

@@ -1,0 +1,18 @@
+{
+  "id": "{1B9960A2-A30C-D846-DF55-800F583AA812}",
+  "name": "Navimow MQTT Receiver",
+  "type": 3,
+  "vendor": "Segway Navimow",
+  "aliases": [
+    "Navimow MQTT Receiver"
+  ],
+  "url": "https://github.com/doctee/symcon-navimow",
+  "parentRequirements": [
+    "{043EA491-0325-4ADD-8FC2-A30C8EEB4D3F}"
+  ],
+  "childRequirements": [],
+  "implemented": [
+    "{7F7632D9-FA40-4F38-8DEA-C83CD4325A32}"
+  ],
+  "prefix": "NAVMQTTRX"
+}

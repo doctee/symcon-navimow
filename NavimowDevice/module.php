@@ -167,6 +167,19 @@ class NavimowDevice extends IPSModule
                 && ($message['SchemaVersion'] ?? null) === self::MESSAGE_SCHEMA_VERSION
                 && ($message['Function'] ?? null) === 'PollStatus'
             ) {
+                $targetDeviceId = $message['DeviceId'] ?? null;
+                if (
+                    $targetDeviceId !== null
+                    && (
+                        !is_string($targetDeviceId)
+                        || !hash_equals(
+                            trim($this->ReadPropertyString('DeviceId')),
+                            $targetDeviceId
+                        )
+                    )
+                ) {
+                    return;
+                }
                 $this->RefreshStatus();
             }
         } catch (Throwable $exception) {

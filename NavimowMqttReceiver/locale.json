@@ -1,0 +1,9 @@
+{
+  "translations": {
+    "de": {
+      "Navimow MQTT Receiver": "Navimow MQTT-Empfaenger",
+      "Navimow Account": "Navimow Konto",
+      "MQTT shadow handoff remains inactive until Account pairing is implemented.": "Die MQTT-Shadow-Uebergabe bleibt inaktiv, bis die Konto-Kopplung implementiert ist."
+    }
+  }
+}
