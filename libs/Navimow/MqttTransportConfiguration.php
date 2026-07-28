@@ -48,7 +48,7 @@ final class MqttTransportConfiguration
                 );
                 $topics[$topic] = [
                     'Topic' => $topic,
-                    'QualityOfService' => 0,
+                    'QoS' => 0,
                 ];
             }
         }
@@ -73,12 +73,33 @@ final class MqttTransportConfiguration
 
         $normalized = [];
         foreach ($subscriptions as $subscription) {
-            $topic = is_array($subscription)
-                ? ($subscription['Topic'] ?? null)
-                : null;
-            $qualityOfService = is_array($subscription)
-                ? ($subscription['QualityOfService'] ?? null)
-                : null;
+            if (!is_array($subscription) || array_is_list($subscription)) {
+                throw new UnexpectedValueException(
+                    'MQTT subscriptions violate the exact-topic contract.'
+                );
+            }
+            $hasCanonicalQos = array_key_exists('QoS', $subscription);
+            $hasLegacyQos = array_key_exists(
+                'QualityOfService',
+                $subscription
+            );
+            if ($hasCanonicalQos === $hasLegacyQos) {
+                throw new UnexpectedValueException(
+                    'MQTT subscriptions violate the exact-topic contract.'
+                );
+            }
+            $qosKey = $hasCanonicalQos ? 'QoS' : 'QualityOfService';
+            $actualKeys = array_keys($subscription);
+            $expectedKeys = ['Topic', $qosKey];
+            sort($actualKeys);
+            sort($expectedKeys);
+            if ($actualKeys !== $expectedKeys) {
+                throw new UnexpectedValueException(
+                    'MQTT subscriptions violate the exact-topic contract.'
+                );
+            }
+            $topic = $subscription['Topic'] ?? null;
+            $qualityOfService = $subscription[$qosKey];
             if (
                 !is_string($topic)
                 || $topic === ''
@@ -97,7 +118,7 @@ final class MqttTransportConfiguration
             }
             $normalized[$topic] = [
                 'Topic' => $topic,
-                'QualityOfService' => 0,
+                'QoS' => 0,
             ];
         }
         ksort($normalized);
