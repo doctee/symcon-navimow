@@ -45,6 +45,9 @@ class NavimowAccount extends IPSModule
     private const MQTT_KEEP_ALIVE_SECONDS = 60;
     private const MQTT_LIFECYCLE_INITIAL_DELAY_SECONDS = 5;
     private const MQTT_KERNEL_RECONCILIATION_DELAY_SECONDS = 15;
+    private const MQTT_KERNEL_CORE_OBSERVATION_OFFSETS_SECONDS =
+        [15, 30, 60, 90];
+    private const MQTT_KERNEL_CORE_OBSERVATION_MAX_ENTRIES = 4;
     private const MQTT_LIFECYCLE_OBSERVATION_SECONDS = 60;
     private const MQTT_LIFECYCLE_HEALTHY_RESET_SECONDS = 900;
     private const MQTT_RECONNECT_DELAYS_SECONDS = [60, 300, 900];
@@ -58,6 +61,8 @@ class NavimowAccount extends IPSModule
     private const MQTT_LIFECYCLE_CONFIGURING = 'Configuring';
     private const MQTT_LIFECYCLE_CONNECTING = 'Connecting';
     private const MQTT_LIFECYCLE_SHADOW_ACTIVE = 'ShadowActive';
+    private const MQTT_LIFECYCLE_CORE_RESUME_OBSERVING =
+        'CoreResumeObserving';
     private const MQTT_LIFECYCLE_RECONNECT_SCHEDULED =
         'ReconnectScheduled';
     private const MQTT_LIFECYCLE_DISCONNECTED = 'Disconnected';
@@ -527,6 +532,7 @@ class NavimowAccount extends IPSModule
                         self::MQTT_LIFECYCLE_CONFIGURING,
                         self::MQTT_LIFECYCLE_CONNECTING,
                         self::MQTT_LIFECYCLE_SHADOW_ACTIVE,
+                        self::MQTT_LIFECYCLE_CORE_RESUME_OBSERVING,
                         self::MQTT_LIFECYCLE_RECONNECT_SCHEDULED,
                         self::MQTT_LIFECYCLE_DISCONNECTED,
                         self::MQTT_LIFECYCLE_REAUTHENTICATION_REQUIRED,
@@ -565,6 +571,7 @@ class NavimowAccount extends IPSModule
                         'connection-failed',
                         'core-resumed',
                         'core-disconnected',
+                        'core-readiness-pending',
                         'disabled',
                         'healthy',
                         'kernel-start-observed',
@@ -600,6 +607,7 @@ class NavimowAccount extends IPSModule
                         [
                             'healthy',
                             'credential-free',
+                            'pending-with-credentials',
                             'unhealthy-with-credentials',
                             'disabled',
                             'authentication-unavailable',
@@ -611,6 +619,25 @@ class NavimowAccount extends IPSModule
                     $this->mqttDiagnosticInteger(
                         $lifecycle['lastKernelCoreClassificationAt']
                             ?? null
+                    ),
+                'kernelCoreObservationCount' =>
+                    $this->mqttDiagnosticInteger(
+                        $lifecycle['kernelCoreObservationCount']
+                            ?? null
+                    ),
+                'kernelCoreObservationDeadlineAt' =>
+                    $this->mqttDiagnosticInteger(
+                        $lifecycle['kernelCoreObservationDeadlineAt']
+                            ?? null
+                    ),
+                'lastKernelCoreFailedPredicates' =>
+                    $this->mqttDiagnosticKernelCorePredicates(
+                        $lifecycle['lastKernelCoreFailedPredicates']
+                            ?? null
+                    ),
+                'kernelCoreObservations' =>
+                    $this->mqttDiagnosticKernelCoreObservations(
+                        $lifecycle['kernelCoreObservations'] ?? null
                     ),
             ],
             'statistics' => [
@@ -777,6 +804,15 @@ class NavimowAccount extends IPSModule
         }
         if (!($validation['valid'] ?? false)) {
             return 'MQTT ownership validation failed.';
+        }
+        if (
+            in_array(
+                $connectionTrigger,
+                ['initial', 'kernel-fallback'],
+                true
+            )
+        ) {
+            $this->clearMqttKernelCoreObservationHistory();
         }
 
         $topology = $this->mqttTopology();
@@ -2104,6 +2140,7 @@ class NavimowAccount extends IPSModule
     private function initializeMqttLifecycle(): void
     {
         if (!$this->ReadPropertyBoolean('EnableMqttShadow')) {
+            $this->clearMqttKernelCoreObservationHistory();
             $this->setMqttLifecycleState(
                 self::MQTT_LIFECYCLE_DISABLED
             );
@@ -2255,6 +2292,7 @@ class NavimowAccount extends IPSModule
         $lifecycle['scheduledKind'] = 'kernel-await-message';
         $lifecycle['scheduledTrigger'] = '';
         $lifecycle['nextAttemptAt'] = 0;
+        $lifecycle = $this->resetMqttKernelCoreObservations($lifecycle);
         $lifecycle['lastTransitionReason'] =
             'kernel-start-awaiting-ready';
         $this->writeMqttLifecycle($lifecycle);
@@ -2364,6 +2402,9 @@ class NavimowAccount extends IPSModule
         $lifecycle['scheduledTrigger'] = '';
         $lifecycle['nextAttemptAt'] =
             $now + self::MQTT_KERNEL_RECONCILIATION_DELAY_SECONDS;
+        $lifecycle = $this->resetMqttKernelCoreObservations($lifecycle);
+        $lifecycle['kernelCoreObservationDeadlineAt'] =
+            $now + max(self::MQTT_KERNEL_CORE_OBSERVATION_OFFSETS_SECONDS);
         $lifecycle['lastTransitionReason'] = 'kernel-start-observed';
         $this->writeMqttLifecycle($lifecycle);
         $this->SetTimerInterval(
@@ -2460,7 +2501,11 @@ class NavimowAccount extends IPSModule
         }
 
         $topology = $this->mqttTopology();
-        if ($this->mqttCoreIsHealthy($topology)) {
+        $projection = $this->recordMqttKernelCoreObservation(
+            $topology,
+            $now
+        );
+        if (($projection['healthy'] ?? false) === true) {
             $this->recordMqttKernelCoreClassification('healthy', $now);
             $this->adoptMqttCoreResume($now);
             return;
@@ -2479,6 +2524,14 @@ class NavimowAccount extends IPSModule
                 'restart-scheduled',
                 'kernel-fallback'
             );
+            return;
+        }
+        $deadline = $this->mqttDiagnosticInteger(
+            $this->mqttLifecycle()['kernelCoreObservationDeadlineAt']
+                ?? null
+        );
+        if ($deadline > $now) {
+            $this->deferMqttKernelCoreObservation($now);
             return;
         }
 
@@ -2522,6 +2575,7 @@ class NavimowAccount extends IPSModule
             }
         }
 
+        $this->clearMqttKernelCoreObservationHistory();
         $this->markMqttKernelReconciled($now);
         $this->setMqttLifecycleState(
             self::MQTT_LIFECYCLE_DISABLED,
@@ -2554,6 +2608,56 @@ class NavimowAccount extends IPSModule
             'core-resumed'
         );
         $this->scheduleMqttObservation();
+    }
+
+    private function deferMqttKernelCoreObservation(int $now): void
+    {
+        $lifecycle = $this->mqttLifecycle();
+        $observedAt = $this->mqttDiagnosticInteger(
+            $lifecycle['kernelStartObservedAt'] ?? null
+        );
+        $deadline = $this->mqttDiagnosticInteger(
+            $lifecycle['kernelCoreObservationDeadlineAt'] ?? null
+        );
+        if ($observedAt === 0 || $deadline <= $now) {
+            return;
+        }
+
+        $nextAttemptAt = $deadline;
+        foreach (
+            self::MQTT_KERNEL_CORE_OBSERVATION_OFFSETS_SECONDS as $offset
+        ) {
+            $candidate = $observedAt + $offset;
+            if ($candidate > $now) {
+                $nextAttemptAt = $candidate;
+                break;
+            }
+        }
+
+        $changed = ($lifecycle['state'] ?? null)
+            !== self::MQTT_LIFECYCLE_CORE_RESUME_OBSERVING;
+        $lifecycle['formatVersion'] = 1;
+        $lifecycle['state'] =
+            self::MQTT_LIFECYCLE_CORE_RESUME_OBSERVING;
+        if (
+            $changed
+            || !is_int($lifecycle['stateChangedAt'] ?? null)
+        ) {
+            $lifecycle['stateChangedAt'] = $now;
+        }
+        $lifecycle['lastTransitionReason'] =
+            'core-readiness-pending';
+        $lifecycle['lastKernelCoreClassification'] =
+            'pending-with-credentials';
+        $lifecycle['lastKernelCoreClassificationAt'] = $now;
+        $lifecycle['scheduledKind'] = 'kernel-reconcile';
+        $lifecycle['scheduledTrigger'] = '';
+        $lifecycle['nextAttemptAt'] = $nextAttemptAt;
+        $this->writeMqttLifecycle($lifecycle);
+        $this->SetTimerInterval(
+            'MqttLifecycle',
+            max(1, $nextAttemptAt - $now) * 1000
+        );
     }
 
     private function scheduleMqttCredentialRotation(): void
@@ -2844,15 +2948,143 @@ class NavimowAccount extends IPSModule
         return 'configuration-invalid';
     }
 
-    private function mqttCoreIsHealthy(array $topology): bool
+    private function recordMqttKernelCoreObservation(
+        array $topology,
+        int $now
+    ): array {
+        $mqttStatus = $this->mqttCoreStatus(
+            $topology['mqttInstanceId']
+        );
+        $webSocketStatus = $this->mqttCoreStatus(
+            $topology['webSocketInstanceId']
+        );
+        $webSocketActive =
+            ($topology['webSocketConfiguration']['Active'] ?? null)
+                === true;
+        $failedPredicates = [];
+        if ($mqttStatus !== 102) {
+            $failedPredicates[] = 'mqtt-status';
+        }
+        if ($webSocketStatus !== 102) {
+            $failedPredicates[] = 'websocket-status';
+        }
+        if (!$webSocketActive) {
+            $failedPredicates[] = 'websocket-inactive';
+        }
+
+        $lifecycle = $this->mqttLifecycle();
+        $observations = $lifecycle['kernelCoreObservations'] ?? [];
+        if (!is_array($observations) || !array_is_list($observations)) {
+            $observations = [];
+        }
+        $latest = $observations === []
+            ? null
+            : $observations[array_key_last($observations)];
+        if (
+            is_array($latest)
+            && ($latest['observedAt'] ?? null) === $now
+        ) {
+            return $latest;
+        }
+
+        $projection = [
+            'ordinal' => min(
+                count($observations) + 1,
+                self::MQTT_KERNEL_CORE_OBSERVATION_MAX_ENTRIES
+            ),
+            'observedAt' => $now,
+            'offsetSeconds' => max(
+                0,
+                $now - $this->mqttDiagnosticInteger(
+                    $lifecycle['kernelStartObservedAt'] ?? null
+                )
+            ),
+            'mqttStatus' => $mqttStatus,
+            'webSocketStatus' => $webSocketStatus,
+            'webSocketActive' => $webSocketActive,
+            'authorizationPresent' =>
+                $this->mqttAuthorizationFieldPresent(
+                    $topology['webSocketConfiguration']['Headers']
+                        ?? null
+                ),
+            'mqttUsernamePresent' =>
+                is_string(
+                    $topology['mqttConfiguration']['UserName'] ?? null
+                )
+                && $topology['mqttConfiguration']['UserName'] !== '',
+            'mqttPasswordPresent' =>
+                is_string(
+                    $topology['mqttConfiguration']['Password'] ?? null
+                )
+                && $topology['mqttConfiguration']['Password'] !== '',
+            'lastReceivedAt' => $this->mqttDiagnosticInteger(
+                $this->mqttStatistics()['lastReceivedAt'] ?? null
+            ),
+            'healthy' => $failedPredicates === [],
+        ];
+        $observations[] = $projection;
+        $observations = array_slice(
+            $observations,
+            -self::MQTT_KERNEL_CORE_OBSERVATION_MAX_ENTRIES
+        );
+        foreach ($observations as $index => &$entry) {
+            if (is_array($entry)) {
+                $entry['ordinal'] = $index + 1;
+            }
+        }
+        unset($entry);
+
+        $lifecycle['formatVersion'] = 1;
+        $lifecycle['kernelCoreObservations'] = $observations;
+        $lifecycle['kernelCoreObservationCount'] = count($observations);
+        $lifecycle['lastKernelCoreFailedPredicates'] =
+            $failedPredicates;
+        $this->writeMqttLifecycle($lifecycle);
+
+        return $projection;
+    }
+
+    private function mqttAuthorizationFieldPresent(mixed $headers): bool
     {
-        return $this->mqttCoreStatus($topology['mqttInstanceId']) === 102
-            && $this->mqttCoreStatus(
-                $topology['webSocketInstanceId']
-            ) === 102
-            && (
-                $topology['webSocketConfiguration']['Active'] ?? null
-            ) === true;
+        if (is_string($headers)) {
+            $headers = json_decode($headers, true, 8);
+        }
+        if (!is_array($headers)) {
+            return false;
+        }
+        foreach ($headers as $header) {
+            if (
+                is_array($header)
+                && is_string($header['Name'] ?? null)
+                && strcasecmp($header['Name'], 'Authorization') === 0
+                && is_string($header['Value'] ?? null)
+                && $header['Value'] !== ''
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function resetMqttKernelCoreObservations(
+        array $lifecycle
+    ): array {
+        $lifecycle['kernelCoreObservations'] = [];
+        $lifecycle['kernelCoreObservationCount'] = 0;
+        $lifecycle['kernelCoreObservationDeadlineAt'] = 0;
+        $lifecycle['lastKernelCoreFailedPredicates'] = [];
+
+        return $lifecycle;
+    }
+
+    private function clearMqttKernelCoreObservationHistory(): void
+    {
+        $lifecycle = $this->resetMqttKernelCoreObservations(
+            $this->mqttLifecycle()
+        );
+        $lifecycle['formatVersion'] = 1;
+        $this->writeMqttLifecycle($lifecycle);
     }
 
     private function mqttCoreStatus(int $instanceId): int
@@ -3486,6 +3718,80 @@ class NavimowAccount extends IPSModule
     private function mqttDiagnosticCount(mixed $value, int $limit): int
     {
         return is_array($value) ? min(count($value), $limit) : 0;
+    }
+
+    private function mqttDiagnosticKernelCorePredicates(
+        mixed $value
+    ): array {
+        if (!is_array($value) || !array_is_list($value)) {
+            return [];
+        }
+        $allowed = [
+            'mqtt-status',
+            'websocket-status',
+            'websocket-inactive',
+        ];
+
+        return array_values(array_filter(
+            array_slice(
+                $value,
+                0,
+                count($allowed)
+            ),
+            static fn (mixed $predicate): bool =>
+                is_string($predicate)
+                && in_array($predicate, $allowed, true)
+        ));
+    }
+
+    private function mqttDiagnosticKernelCoreObservations(
+        mixed $value
+    ): array {
+        if (!is_array($value) || !array_is_list($value)) {
+            return [];
+        }
+        $result = [];
+        foreach (
+            array_slice(
+                $value,
+                -self::MQTT_KERNEL_CORE_OBSERVATION_MAX_ENTRIES
+            ) as $entry
+        ) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            $result[] = [
+                'ordinal' => $this->mqttDiagnosticInteger(
+                    $entry['ordinal'] ?? null
+                ),
+                'observedAt' => $this->mqttDiagnosticInteger(
+                    $entry['observedAt'] ?? null
+                ),
+                'offsetSeconds' => $this->mqttDiagnosticInteger(
+                    $entry['offsetSeconds'] ?? null
+                ),
+                'mqttStatus' => $this->mqttDiagnosticInteger(
+                    $entry['mqttStatus'] ?? null
+                ),
+                'webSocketStatus' => $this->mqttDiagnosticInteger(
+                    $entry['webSocketStatus'] ?? null
+                ),
+                'webSocketActive' =>
+                    ($entry['webSocketActive'] ?? false) === true,
+                'authorizationPresent' =>
+                    ($entry['authorizationPresent'] ?? false) === true,
+                'mqttUsernamePresent' =>
+                    ($entry['mqttUsernamePresent'] ?? false) === true,
+                'mqttPasswordPresent' =>
+                    ($entry['mqttPasswordPresent'] ?? false) === true,
+                'lastReceivedAt' => $this->mqttDiagnosticInteger(
+                    $entry['lastReceivedAt'] ?? null
+                ),
+                'healthy' => ($entry['healthy'] ?? false) === true,
+            ];
+        }
+
+        return $result;
     }
 
     private function mqttDiagnosticErrors(): array
