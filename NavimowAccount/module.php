@@ -157,21 +157,26 @@ class NavimowAccount extends IPSModule
         $this->clearMqttEphemeralState();
         $this->SetTimerInterval('MqttReconcile', 0);
         $this->SetTimerInterval('MqttLifecycle', 0);
-        if (!$this->ReadPropertyBoolean('EnableMqttShadow')) {
-            $this->disconnectOwnedMqttTransportSafely();
-        } elseif (
-            $this->ReadAttributeString('MqttOwnershipRegistry') !== '{}'
-            && !$kernelReconciliationRequired
-        ) {
-            $this->disconnectOwnedMqttTransportSafely();
+        if (!$kernelReconciliationRequired) {
+            if (!$this->ReadPropertyBoolean('EnableMqttShadow')) {
+                $this->disconnectOwnedMqttTransportSafely();
+            } elseif (
+                $this->ReadAttributeString('MqttOwnershipRegistry')
+                    !== '{}'
+            ) {
+                $this->disconnectOwnedMqttTransportSafely();
+            }
+            $this->initializeMqttLifecycle();
         }
-        $this->initializeMqttLifecycle();
 
         if (!$this->hasValidConfiguration()) {
             $this->SetTimerInterval('PollStatus', 0);
             $this->SetTimerInterval('RefreshToken', 0);
             $this->clearAdaptivePollingState();
             $this->setAuthenticationState(self::STATE_CONFIGURATION_ERROR, true);
+            if ($kernelReconciliationRequired) {
+                $this->continueMqttKernelReconciliation();
+            }
             return;
         }
 
@@ -180,6 +185,9 @@ class NavimowAccount extends IPSModule
             $this->SetTimerInterval('RefreshToken', 0);
             $this->clearAdaptivePollingState();
             $this->setAuthenticationState(self::STATE_AUTHORIZATION_PENDING, true);
+            if ($kernelReconciliationRequired) {
+                $this->continueMqttKernelReconciliation();
+            }
             return;
         }
 
@@ -191,11 +199,7 @@ class NavimowAccount extends IPSModule
             false
         );
         if ($kernelReconciliationRequired) {
-            if ($this->mqttKernelReconciliationIsPending()) {
-                $this->scheduleMqttKernelReconciliation();
-            } else {
-                $this->markMqttKernelReconciliationAwaitingMessage();
-            }
+            $this->continueMqttKernelReconciliation();
             return;
         }
         $this->markCurrentKernelEpochReconciled();
@@ -2154,10 +2158,7 @@ class NavimowAccount extends IPSModule
     {
         if (
             !$this->ReadPropertyBoolean('EnableMqttShadow')
-            || !$this->hasValidConfiguration()
-            || !$this->hasUsableAccessToken()
             || $this->ReadAttributeString('MqttOwnershipRegistry') === '{}'
-            || !($this->inspectMqttShadowConfiguration()['valid'] ?? false)
         ) {
             return false;
         }
@@ -2186,6 +2187,15 @@ class NavimowAccount extends IPSModule
 
         return $recordedKernelStartTime > 0
             && $recordedKernelStartTime !== $currentKernelStartTime;
+    }
+
+    private function continueMqttKernelReconciliation(): void
+    {
+        if ($this->mqttKernelReconciliationIsPending()) {
+            $this->scheduleMqttKernelReconciliation();
+            return;
+        }
+        $this->markMqttKernelReconciliationAwaitingMessage();
     }
 
     private function mqttKernelReconciliationIsPending(): bool
@@ -2368,6 +2378,38 @@ class NavimowAccount extends IPSModule
             $this->recordMqttKernelCoreClassification('disabled', $now);
             $this->clearMqttCredentialRotationPending();
             $this->reconcileDisabledMqttAfterKernelStart($now);
+            return;
+        }
+        if (!$this->hasValidConfiguration()) {
+            $this->recordMqttKernelCoreClassification(
+                'configuration-invalid',
+                $now
+            );
+            $this->clearMqttCredentialRotationPending();
+            if (
+                $this->ReadAttributeString('MqttOwnershipRegistry') !== '{}'
+            ) {
+                try {
+                    $this->disconnectOwnedMqttTransport();
+                } catch (Throwable) {
+                    $this->recordMqttKernelCoreClassification(
+                        'ownership-invalid',
+                        $now
+                    );
+                    $this->appendMqttError(
+                        'credential-cleanup-skipped'
+                    );
+                    $this->markMqttKernelReconciled($now);
+                    $this->setMqttLifecycleState(
+                        self::MQTT_LIFECYCLE_CONFIGURATION_ERROR
+                    );
+                    return;
+                }
+            }
+            $this->markMqttKernelReconciled($now);
+            $this->setMqttLifecycleState(
+                self::MQTT_LIFECYCLE_CONFIGURATION_ERROR
+            );
             return;
         }
         if (!$this->hasUsableAccessToken()) {
