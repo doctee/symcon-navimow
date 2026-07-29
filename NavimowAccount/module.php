@@ -514,7 +514,7 @@ class NavimowAccount extends IPSModule
         $validation = $this->inspectMqttShadowConfiguration();
 
         return $this->encodeResult([
-            'formatVersion' => 1,
+            'formatVersion' => 2,
             'featureEnabled' =>
                 $this->ReadPropertyBoolean('EnableMqttShadow'),
             'configurationStatus' => $this->mqttDiagnosticCode(
@@ -740,6 +740,8 @@ class NavimowAccount extends IPSModule
                         $pending['entries'] ?? null,
                         self::MQTT_MAX_TRACKED_DEVICES
                     ),
+                'observation' =>
+                    $this->mqttDiagnosticShadowObservation($shadow),
             ],
         ]);
     }
@@ -3718,6 +3720,154 @@ class NavimowAccount extends IPSModule
     private function mqttDiagnosticCount(mixed $value, int $limit): int
     {
         return is_array($value) ? min(count($value), $limit) : 0;
+    }
+
+    private function mqttDiagnosticShadowObservation(
+        array $shadow
+    ): array {
+        $result = $this->emptyMqttDiagnosticShadowObservation(
+            'invalid'
+        );
+        if (
+            ($shadow['formatVersion'] ?? null) !== 1
+            || !is_array($shadow['devices'] ?? null)
+        ) {
+            return $result;
+        }
+
+        $devices = $shadow['devices'];
+        if ($devices === []) {
+            return $this->emptyMqttDiagnosticShadowObservation(
+                'unavailable'
+            );
+        }
+        if (count($devices) !== 1) {
+            return $this->emptyMqttDiagnosticShadowObservation(
+                'ambiguous'
+            );
+        }
+
+        $deviceKey = array_key_first($devices);
+        $entry = $devices[$deviceKey] ?? null;
+        $state = is_array($entry)
+            ? ($entry['state'] ?? null)
+            : null;
+        if (
+            !is_string($deviceKey)
+            || preg_match('/^[a-f0-9]{64}$/D', $deviceKey) !== 1
+            || !is_array($state)
+            || ($state['formatVersion'] ?? null) !== 1
+            || !is_array($state['fields'] ?? null)
+            || !array_key_exists('lastSourceTimestamp', $state)
+            || !array_key_exists('lastReceivedAt', $state)
+        ) {
+            return $result;
+        }
+
+        $sourceTimestamp = $state['lastSourceTimestamp'];
+        $receivedAt = $state['lastReceivedAt'];
+        if (
+            (
+                $sourceTimestamp !== null
+                && (
+                    !is_int($sourceTimestamp)
+                    || $sourceTimestamp <= 0
+                )
+            )
+            || !is_int($receivedAt)
+            || $receivedAt <= 0
+        ) {
+            return $result;
+        }
+
+        $fields = $state['fields'];
+        if ($fields !== [] && array_is_list($fields)) {
+            return $result;
+        }
+
+        return [
+            'status' => 'available',
+            'authority' => 'mqtt-hint',
+            'lastSourceTimestamp' => $sourceTimestamp,
+            'lastReceivedAt' => $receivedAt,
+            'ageSeconds' => max(
+                0,
+                $this->currentTimestamp() - $receivedAt
+            ),
+            'fields' => [
+                'vehicleState' =>
+                    $this->mqttDiagnosticRangedInteger(
+                        $fields['vehicleState'] ?? null,
+                        0,
+                        11
+                    ),
+                'batteryLevel' =>
+                    $this->mqttDiagnosticPercentage(
+                        $fields['batteryLevel'] ?? null
+                    ),
+                'mowingPercentage' =>
+                    $this->mqttDiagnosticPercentage(
+                        $fields['mowingPercentage'] ?? null
+                    ),
+                'locationType' =>
+                    $this->mqttDiagnosticRangedInteger(
+                        $fields['locationType'] ?? null,
+                        0,
+                        self::MQTT_MAX_DIAGNOSTIC_COUNTER
+                    ),
+                'locationVehicleStateCode' =>
+                    $this->mqttDiagnosticRangedInteger(
+                        $fields['locationVehicleStateCode'] ?? null,
+                        0,
+                        self::MQTT_MAX_DIAGNOSTIC_COUNTER
+                    ),
+            ],
+        ];
+    }
+
+    private function emptyMqttDiagnosticShadowObservation(
+        string $status
+    ): array {
+        return [
+            'status' => $status,
+            'authority' => 'mqtt-hint',
+            'lastSourceTimestamp' => null,
+            'lastReceivedAt' => null,
+            'ageSeconds' => null,
+            'fields' => [
+                'vehicleState' => null,
+                'batteryLevel' => null,
+                'mowingPercentage' => null,
+                'locationType' => null,
+                'locationVehicleStateCode' => null,
+            ],
+        ];
+    }
+
+    private function mqttDiagnosticRangedInteger(
+        mixed $value,
+        int $minimum,
+        int $maximum
+    ): ?int {
+        return is_int($value)
+            && $value >= $minimum
+            && $value <= $maximum
+                ? $value
+                : null;
+    }
+
+    private function mqttDiagnosticPercentage(mixed $value): int|float|null
+    {
+        if (
+            (!is_int($value) && !is_float($value))
+            || !is_finite((float) $value)
+            || $value < 0
+            || $value > 100
+        ) {
+            return null;
+        }
+
+        return $value;
     }
 
     private function mqttDiagnosticKernelCorePredicates(
