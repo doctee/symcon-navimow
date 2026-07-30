@@ -98,6 +98,11 @@
     },
     {
       "type": "Button",
+      "caption": "Show MQTT Pilot Diagnostics",
+      "onClick": "echo NAVAC_GetMqttPilotDiagnostics($id);"
+    },
+    {
+      "type": "Button",
       "caption": "Adopt MQTT Shadow Chain",
       "confirm": "Adopt the configured inactive and credential-empty MQTT chain?",
       "onClick": "echo NAVAC_AdoptMqttShadowChain($id);"
