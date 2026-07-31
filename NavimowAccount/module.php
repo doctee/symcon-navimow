@@ -57,6 +57,9 @@ class NavimowAccount extends IPSModule
     private const MQTT_PILOT_MAX_CHECKPOINTS = 32;
     private const MQTT_PILOT_MAX_EPISODES = 32;
     private const MQTT_PILOT_MAX_ROTATIONS = 64;
+    private const MQTT_PILOT_MAX_CORE_TRANSITIONS = 32;
+    private const MQTT_PILOT_MAX_EPISODE_CORE_TRANSITIONS = 8;
+    private const MQTT_PILOT_CORE_TRANSITION_LOOKBACK_SECONDS = 120;
     private const MQTT_LIFECYCLE_DISABLED = 'Disabled';
     private const MQTT_LIFECYCLE_WAITING_FOR_AUTHENTICATION =
         'WaitingForAuthentication';
@@ -232,13 +235,18 @@ class NavimowAccount extends IPSModule
         $Data
     ) {
         if (
-            $SenderID !== 0
-            || $Message !== $this->kernelStartedMessageId()
+            $SenderID === 0
+            && $Message === $this->kernelStartedMessageId()
         ) {
+            $this->scheduleMqttKernelReconciliation();
             return;
         }
 
-        $this->scheduleMqttKernelReconciliation();
+        if ($Message !== $this->instanceStatusChangedMessageId()) {
+            return;
+        }
+
+        $this->recordMqttPilotCoreStatusMessage((int) $SenderID);
     }
 
     public function GetAuthorizationUrl(): string
@@ -2403,6 +2411,131 @@ class NavimowAccount extends IPSModule
         return is_int($messageId) ? $messageId : 10001;
     }
 
+    private function instanceStatusChangedMessageId(): int
+    {
+        if (!defined('IM_CHANGESTATUS')) {
+            return 10505;
+        }
+        $messageId = constant('IM_CHANGESTATUS');
+
+        return is_int($messageId) ? $messageId : 10505;
+    }
+
+    private function reconcileMqttPilotCoreStatusMessages(): void
+    {
+        if (
+            $this->mqttKernelReconciliationIsPending()
+            || $this->mqttKernelReconciliationMustTakePrecedence()
+        ) {
+            return;
+        }
+        $desiredSenderIds = [];
+        $registry = $this->mqttPilotRegistry();
+        if (
+            $this->ReadPropertyBoolean('EnableMqttShadow')
+            && ($registry['active'] ?? false) === true
+            && ($this->inspectMqttShadowConfiguration()['valid'] ?? false)
+        ) {
+            try {
+                $topology = $this->mqttTopology();
+                $this->assertMqttOwnership($topology);
+                $desiredSenderIds = [
+                    $topology['mqttInstanceId'],
+                    $topology['webSocketInstanceId'],
+                ];
+            } catch (Throwable) {
+                $desiredSenderIds = [];
+            }
+        }
+
+        $this->replaceMqttPilotCoreStatusMessages($desiredSenderIds);
+    }
+
+    private function replaceMqttPilotCoreStatusMessages(
+        array $desiredSenderIds
+    ): void {
+        $getMessageList = [$this, 'Get' . 'MessageList'];
+        $registerMessage = [$this, 'Register' . 'Message'];
+        $unregisterMessage = [$this, 'Unregister' . 'Message'];
+        if (
+            !is_callable($getMessageList)
+            || !is_callable($registerMessage)
+            || !is_callable($unregisterMessage)
+        ) {
+            return;
+        }
+        $messageId = $this->instanceStatusChangedMessageId();
+        $desired = [];
+        foreach ($desiredSenderIds as $senderId) {
+            if (is_int($senderId) && $senderId > 0) {
+                $desired[$senderId] = true;
+            }
+        }
+        foreach ($getMessageList() as $senderId => $messageIds) {
+            if (
+                !is_int($senderId)
+                || !is_array($messageIds)
+                || !in_array($messageId, $messageIds, true)
+                || isset($desired[$senderId])
+            ) {
+                continue;
+            }
+            $unregisterMessage($senderId, $messageId);
+        }
+        foreach (array_keys($desired) as $senderId) {
+            $registerMessage($senderId, $messageId);
+        }
+    }
+
+    private function recordMqttPilotCoreStatusMessage(int $senderId): void
+    {
+        if (
+            $senderId <= 0
+            || !$this->ReadPropertyBoolean('EnableMqttShadow')
+            || ($this->mqttPilotRegistry()['active'] ?? false) !== true
+            || !($this->inspectMqttShadowConfiguration()['valid'] ?? false)
+        ) {
+            return;
+        }
+        try {
+            $topology = $this->mqttTopology();
+            $this->assertMqttOwnership($topology);
+        } catch (Throwable) {
+            return;
+        }
+        $senderRole = match ($senderId) {
+            $topology['mqttInstanceId'] => 'mqtt',
+            $topology['webSocketInstanceId'] => 'websocket',
+            default => '',
+        };
+        if ($senderRole === '') {
+            return;
+        }
+
+        $lockName = 'NAVIMOW.MQTT.LIFECYCLE.' . $this->InstanceID;
+        if (
+            !IPS_SemaphoreEnter(
+                $lockName,
+                self::MQTT_SEMAPHORE_TIMEOUT_MILLISECONDS
+            )
+        ) {
+            $this->recordMqttStatistic('coreStatusEventDrops');
+            return;
+        }
+        try {
+            $this->recordMqttPilotCoreStatusTransition(
+                $senderRole,
+                $this->mqttCoreStatus($topology['mqttInstanceId']),
+                $this->mqttCoreStatus($topology['webSocketInstanceId']),
+                ($topology['webSocketConfiguration']['Active'] ?? null)
+                    === true,
+                $this->currentTimestamp()
+            );
+        } finally {
+            IPS_SemaphoreLeave($lockName);
+        }
+    }
+
     private function scheduleMqttKernelReconciliation(): void
     {
         $kernelStartTime = $this->currentKernelStartTime();
@@ -2818,6 +2951,13 @@ class NavimowAccount extends IPSModule
             'MqttLifecycle',
             max(1, $delaySeconds) * 1000
         );
+        if ($kind === 'reconnect') {
+            $now = $this->currentTimestamp();
+            $this->recordMqttPilotReconnectScheduled(
+                $now,
+                $now + max(0, $delaySeconds)
+            );
+        }
     }
 
     private function scheduleMqttReconnect(string $reason): void
@@ -2863,6 +3003,9 @@ class NavimowAccount extends IPSModule
         $lifecycle['nextAttemptAt'] = 0;
         $this->writeMqttLifecycle($lifecycle);
         $this->recordMqttStatistic('reconnectAttempts');
+        $this->recordMqttPilotReconnectStarted(
+            $this->currentTimestamp()
+        );
 
         return true;
     }
@@ -2914,6 +3057,10 @@ class NavimowAccount extends IPSModule
         $this->setMqttLifecycleState(
             self::MQTT_LIFECYCLE_SHADOW_ACTIVE,
             'healthy'
+        );
+        $this->recordMqttPilotCoreReady(
+            $timestamp,
+            'lifecycle-observation'
         );
         $this->closeMqttPilotEpisode('recovered', $timestamp);
     }
@@ -3267,11 +3414,13 @@ class NavimowAccount extends IPSModule
         $now = $this->currentTimestamp();
         if (!$this->ReadPropertyBoolean('EnableMqttShadow')) {
             $this->stopMqttPilotObservation('disabled', $now);
+            $this->reconcileMqttPilotCoreStatusMessages();
             return;
         }
 
         if (($registry['active'] ?? false) !== true) {
             $this->SetTimerInterval('MqttPilotCheckpoint', 0);
+            $this->reconcileMqttPilotCoreStatusMessages();
             return;
         }
 
@@ -3288,6 +3437,7 @@ class NavimowAccount extends IPSModule
             'MqttPilotCheckpoint',
             max(1, $nextCheckpointAt - $now) * 1000
         );
+        $this->reconcileMqttPilotCoreStatusMessages();
     }
 
     private function recordMqttPilotCheckpoint(string $reason): void
@@ -3410,19 +3560,83 @@ class NavimowAccount extends IPSModule
             return;
         }
         $lifecycle = $this->mqttLifecycle();
+        $statistics = $this->mqttStatistics();
+        $sessionSequence = $this->mqttDiagnosticInteger(
+            $registry['sessionSequence'] ?? null
+        );
+        $recentTransitions = $this->mqttPilotRecentCoreTransitions(
+            $registry['coreTransitions'] ?? null,
+            $sessionSequence,
+            $timestamp
+        );
+        $faultTransition = null;
+        foreach ($recentTransitions as $transition) {
+            if (($transition['classification'] ?? null) === 'error') {
+                $faultTransition = $transition;
+            }
+        }
+        $coreFaultObservedAt = $this->mqttDiagnosticInteger(
+            is_array($faultTransition)
+                ? ($faultTransition['observedAt'] ?? null)
+                : null
+        );
+        $lastMqttReceivedAt = $this->mqttDiagnosticInteger(
+            $statistics['lastReceivedAt'] ?? null
+        );
+        $lastRestSuccessAt = $this->mqttDiagnosticInteger(
+            $this->GetValue('LastRestSuccess')
+        );
+        $nearestPriorRotationAt = $this->mqttPilotNearestRotationAt(
+            $registry['rotations'] ?? null,
+            $sessionSequence,
+            $timestamp
+        );
         $sequence = $this->incrementMqttCounter(
             $registry['episodeSequence'] ?? null
         );
         $registry['episodeSequence'] = $sequence;
         $registry['openEpisode'] = [
             'sequence' => $sequence,
-            'sessionSequence' => $this->mqttDiagnosticInteger(
-                $registry['sessionSequence'] ?? null
-            ),
+            'sessionSequence' => $sessionSequence,
             'detectedAt' => $timestamp,
             'detectionSource' => $source,
             'mqttStatus' => max(0, $mqttStatus),
             'webSocketStatus' => max(0, $webSocketStatus),
+            'coreFaultObservedAt' => $coreFaultObservedAt,
+            'coreFaultLeadSeconds' => $coreFaultObservedAt > 0
+                ? max(0, $timestamp - $coreFaultObservedAt)
+                : 0,
+            'reconnectScheduledAt' => 0,
+            'reconnectDueAt' => 0,
+            'reconnectStartedAt' => 0,
+            'coreReadyAt' => 0,
+            'coreReadySource' => 'unknown',
+            'recoveryConfirmationLagSeconds' => 0,
+            'lastMqttReceivedAt' => $lastMqttReceivedAt,
+            'mqttIngressAgeSeconds' => $lastMqttReceivedAt > 0
+                ? max(0, $timestamp - $lastMqttReceivedAt)
+                : 0,
+            'mqttIngressSeen' => $lastMqttReceivedAt > 0,
+            'lastRestSuccessAt' => $lastRestSuccessAt,
+            'restSuccessAgeSeconds' => $lastRestSuccessAt > 0
+                ? max(0, $timestamp - $lastRestSuccessAt)
+                : 0,
+            'restSuccessSeen' => $lastRestSuccessAt > 0,
+            'restConnectionState' => max(
+                0,
+                (int) $this->GetValue('ConnectionState')
+            ),
+            'nearestPriorRotationAt' => $nearestPriorRotationAt,
+            'rotationSeparationSeconds' => $nearestPriorRotationAt > 0
+                ? max(0, $timestamp - $nearestPriorRotationAt)
+                : 0,
+            'coreTransitions' => array_slice(
+                $recentTransitions,
+                -self::MQTT_PILOT_MAX_EPISODE_CORE_TRANSITIONS
+            ),
+            'diagnosticCompleteness' => $coreFaultObservedAt > 0
+                ? 'partial'
+                : 'polling-fallback',
             'reconnectAttemptsUsed' => $this->mqttDiagnosticInteger(
                 $lifecycle['reconnectAttempt'] ?? null
             ),
@@ -3434,6 +3648,174 @@ class NavimowAccount extends IPSModule
             'kernelEpochChanged' => false,
         ];
         $this->writeMqttPilotRegistry($registry);
+    }
+
+    private function recordMqttPilotCoreStatusTransition(
+        string $senderRole,
+        int $mqttStatus,
+        int $webSocketStatus,
+        bool $webSocketActive,
+        int $timestamp
+    ): void {
+        if (!in_array($senderRole, ['mqtt', 'websocket'], true)) {
+            return;
+        }
+        $registry = $this->mqttPilotRegistry();
+        if (($registry['active'] ?? false) !== true) {
+            return;
+        }
+        $classification = $this->mqttPilotCoreClassification(
+            $mqttStatus,
+            $webSocketStatus,
+            $webSocketActive
+        );
+        $transitions = is_array($registry['coreTransitions'] ?? null)
+            ? $registry['coreTransitions']
+            : [];
+        $latest = $transitions === []
+            ? null
+            : $transitions[array_key_last($transitions)];
+        if (
+            is_array($latest)
+            && ($latest['observedAt'] ?? null) === $timestamp
+            && ($latest['senderRole'] ?? null) === $senderRole
+            && ($latest['mqttStatus'] ?? null) === $mqttStatus
+            && ($latest['webSocketStatus'] ?? null) === $webSocketStatus
+            && ($latest['classification'] ?? null) === $classification
+        ) {
+            return;
+        }
+        $sequence = $this->incrementMqttCounter(
+            $registry['coreTransitionSequence'] ?? null
+        );
+        $openEpisode = $registry['openEpisode'] ?? null;
+        $transition = [
+            'sequence' => $sequence,
+            'sessionSequence' => $this->mqttDiagnosticInteger(
+                $registry['sessionSequence'] ?? null
+            ),
+            'observedAt' => max(0, $timestamp),
+            'senderRole' => $senderRole,
+            'mqttStatus' => max(0, $mqttStatus),
+            'webSocketStatus' => max(0, $webSocketStatus),
+            'classification' => $classification,
+            'openEpisodeSequence' => is_array($openEpisode)
+                ? $this->mqttDiagnosticInteger(
+                    $openEpisode['sequence'] ?? null
+                )
+                : 0,
+        ];
+        $transitions[] = $transition;
+        $registry['coreTransitionSequence'] = $sequence;
+        $registry['coreTransitions'] = array_slice(
+            $transitions,
+            -self::MQTT_PILOT_MAX_CORE_TRANSITIONS
+        );
+        if (is_array($openEpisode)) {
+            $episodeTransitions = is_array(
+                $openEpisode['coreTransitions'] ?? null
+            ) ? $openEpisode['coreTransitions'] : [];
+            $episodeTransitions[] = $transition;
+            $openEpisode['coreTransitions'] = array_slice(
+                $episodeTransitions,
+                -self::MQTT_PILOT_MAX_EPISODE_CORE_TRANSITIONS
+            );
+            if (
+                $classification === 'healthy'
+                && $this->mqttDiagnosticInteger(
+                    $openEpisode['coreReadyAt'] ?? null
+                ) === 0
+            ) {
+                $openEpisode['coreReadyAt'] = max(0, $timestamp);
+                $openEpisode['coreReadySource'] = 'status-message';
+            }
+            $registry['openEpisode'] = $openEpisode;
+        }
+        $this->writeMqttPilotRegistry($registry);
+    }
+
+    private function mqttPilotCoreClassification(
+        int $mqttStatus,
+        int $webSocketStatus,
+        bool $webSocketActive
+    ): string {
+        if (
+            $mqttStatus === 102
+            && $webSocketStatus === 102
+            && $webSocketActive
+        ) {
+            return 'healthy';
+        }
+        if ($mqttStatus >= 200 || $webSocketStatus >= 200) {
+            return 'error';
+        }
+        if ($mqttStatus === 104 || $webSocketStatus === 104) {
+            return 'inactive';
+        }
+        if ($mqttStatus <= 0 || $webSocketStatus <= 0) {
+            return 'unknown';
+        }
+
+        return 'transitioning';
+    }
+
+    private function mqttPilotRecentCoreTransitions(
+        mixed $value,
+        int $sessionSequence,
+        int $timestamp
+    ): array {
+        if (!is_array($value)) {
+            return [];
+        }
+        $minimumTimestamp = max(
+            0,
+            $timestamp
+                - self::MQTT_PILOT_CORE_TRANSITION_LOOKBACK_SECONDS
+        );
+        $result = [];
+        foreach ($value as $entry) {
+            if (
+                !is_array($entry)
+                || ($entry['sessionSequence'] ?? null)
+                    !== $sessionSequence
+                || !is_int($entry['observedAt'] ?? null)
+                || $entry['observedAt'] < $minimumTimestamp
+                || $entry['observedAt'] > $timestamp
+            ) {
+                continue;
+            }
+            $result[] = $entry;
+        }
+
+        return array_slice(
+            $result,
+            -self::MQTT_PILOT_MAX_EPISODE_CORE_TRANSITIONS
+        );
+    }
+
+    private function mqttPilotNearestRotationAt(
+        mixed $value,
+        int $sessionSequence,
+        int $timestamp
+    ): int {
+        if (!is_array($value)) {
+            return 0;
+        }
+        $nearest = 0;
+        foreach ($value as $entry) {
+            if (
+                !is_array($entry)
+                || ($entry['sessionSequence'] ?? null)
+                    !== $sessionSequence
+                || !is_int($entry['occurredAt'] ?? null)
+                || $entry['occurredAt'] > $timestamp
+            ) {
+                continue;
+            }
+            $nearest = max($nearest, $entry['occurredAt']);
+        }
+
+        return $nearest;
     }
 
     private function startMqttPilotObservationIfNeeded(): void
@@ -3461,6 +3843,7 @@ class NavimowAccount extends IPSModule
             'MqttPilotCheckpoint',
             self::MQTT_PILOT_CHECKPOINT_SECONDS * 1000
         );
+        $this->reconcileMqttPilotCoreStatusMessages();
     }
 
     private function stopMqttPilotObservation(
@@ -3470,6 +3853,7 @@ class NavimowAccount extends IPSModule
         $this->SetTimerInterval('MqttPilotCheckpoint', 0);
         $registry = $this->mqttPilotRegistry();
         if (($registry['active'] ?? false) !== true) {
+            $this->reconcileMqttPilotCoreStatusMessages();
             return;
         }
         $this->closeMqttPilotEpisode($outcome, $timestamp);
@@ -3477,6 +3861,69 @@ class NavimowAccount extends IPSModule
         $registry['active'] = false;
         $registry['stoppedAt'] = $timestamp;
         $registry['nextCheckpointAt'] = 0;
+        $this->writeMqttPilotRegistry($registry);
+        $this->reconcileMqttPilotCoreStatusMessages();
+    }
+
+    private function recordMqttPilotReconnectScheduled(
+        int $scheduledAt,
+        int $dueAt
+    ): void {
+        $registry = $this->mqttPilotRegistry();
+        $episode = $registry['openEpisode'] ?? null;
+        if (
+            !is_array($episode)
+            || $this->mqttDiagnosticInteger(
+                $episode['reconnectScheduledAt'] ?? null
+            ) > 0
+        ) {
+            return;
+        }
+        $episode['reconnectScheduledAt'] = max(0, $scheduledAt);
+        $episode['reconnectDueAt'] = max(0, $dueAt);
+        $registry['openEpisode'] = $episode;
+        $this->writeMqttPilotRegistry($registry);
+    }
+
+    private function recordMqttPilotReconnectStarted(
+        int $timestamp
+    ): void {
+        $registry = $this->mqttPilotRegistry();
+        $episode = $registry['openEpisode'] ?? null;
+        if (
+            !is_array($episode)
+            || $this->mqttDiagnosticInteger(
+                $episode['reconnectStartedAt'] ?? null
+            ) > 0
+        ) {
+            return;
+        }
+        $episode['reconnectStartedAt'] = max(0, $timestamp);
+        $registry['openEpisode'] = $episode;
+        $this->writeMqttPilotRegistry($registry);
+    }
+
+    private function recordMqttPilotCoreReady(
+        int $timestamp,
+        string $source
+    ): void {
+        $registry = $this->mqttPilotRegistry();
+        $episode = $registry['openEpisode'] ?? null;
+        if (
+            !is_array($episode)
+            || $this->mqttDiagnosticInteger(
+                $episode['coreReadyAt'] ?? null
+            ) > 0
+        ) {
+            return;
+        }
+        $episode['coreReadyAt'] = max(0, $timestamp);
+        $episode['coreReadySource'] = in_array(
+            $source,
+            ['status-message', 'lifecycle-observation'],
+            true
+        ) ? $source : 'unknown';
+        $registry['openEpisode'] = $episode;
         $this->writeMqttPilotRegistry($registry);
     }
 
@@ -3504,6 +3951,26 @@ class NavimowAccount extends IPSModule
         $episode['recoveredAt'] = $timestamp;
         $episode['durationSeconds'] = max(0, $timestamp - $detectedAt);
         $episode['outcome'] = $outcome;
+        $coreReadyAt = $this->mqttDiagnosticInteger(
+            $episode['coreReadyAt'] ?? null
+        );
+        $episode['recoveryConfirmationLagSeconds'] = $coreReadyAt > 0
+            ? max(0, $timestamp - $coreReadyAt)
+            : 0;
+        if (
+            ($episode['diagnosticCompleteness'] ?? null)
+                !== 'polling-fallback'
+        ) {
+            $episode['diagnosticCompleteness'] =
+                $this->mqttDiagnosticInteger(
+                    $episode['reconnectStartedAt'] ?? null
+                ) > 0
+                && $coreReadyAt > 0
+                && ($episode['mqttIngressSeen'] ?? false) === true
+                && ($episode['restSuccessSeen'] ?? false) === true
+                    ? 'complete'
+                    : 'partial';
+        }
         $kernelStartTime = $this->mqttDiagnosticInteger(
             $episode['kernelStartTime'] ?? null
         );
@@ -3574,7 +4041,7 @@ class NavimowAccount extends IPSModule
             'MqttPilotObservationRegistry',
             []
         );
-        $registry['formatVersion'] = 1;
+        $registry['formatVersion'] = 2;
         $registry['checkpoints'] = is_array(
             $registry['checkpoints'] ?? null
         ) ? $registry['checkpoints'] : [];
@@ -3584,6 +4051,9 @@ class NavimowAccount extends IPSModule
         $registry['rotations'] = is_array(
             $registry['rotations'] ?? null
         ) ? $registry['rotations'] : [];
+        $registry['coreTransitions'] = is_array(
+            $registry['coreTransitions'] ?? null
+        ) ? $registry['coreTransitions'] : [];
 
         return $registry;
     }
@@ -3591,7 +4061,7 @@ class NavimowAccount extends IPSModule
     private function writeMqttPilotRegistry(array $registry): void
     {
         $registry = [
-            'formatVersion' => 1,
+            'formatVersion' => 2,
             'active' => ($registry['active'] ?? false) === true,
             'sessionSequence' => $this->mqttDiagnosticInteger(
                 $registry['sessionSequence'] ?? null
@@ -3617,32 +4087,76 @@ class NavimowAccount extends IPSModule
             'rotationSequence' => $this->mqttDiagnosticInteger(
                 $registry['rotationSequence'] ?? null
             ),
+            'coreTransitionSequence' => $this->mqttDiagnosticInteger(
+                $registry['coreTransitionSequence'] ?? null
+            ),
             'checkpoints' => array_slice(
-                is_array($registry['checkpoints'] ?? null)
-                    ? $registry['checkpoints']
-                    : [],
+                $this->mqttPilotDiagnosticCheckpoints(
+                    $registry['checkpoints'] ?? null
+                ),
                 -self::MQTT_PILOT_MAX_CHECKPOINTS
             ),
             'episodes' => array_slice(
-                is_array($registry['episodes'] ?? null)
-                    ? $registry['episodes']
-                    : [],
+                $this->mqttPilotStorageEpisodes(
+                    $registry['episodes'] ?? null
+                ),
                 -self::MQTT_PILOT_MAX_EPISODES
             ),
             'rotations' => array_slice(
-                is_array($registry['rotations'] ?? null)
-                    ? $registry['rotations']
-                    : [],
+                $this->mqttPilotDiagnosticRotations(
+                    $registry['rotations'] ?? null
+                ),
                 -self::MQTT_PILOT_MAX_ROTATIONS
             ),
-            'openEpisode' => is_array(
+            'coreTransitions' => array_slice(
+                $this->mqttPilotDiagnosticCoreTransitions(
+                    $registry['coreTransitions'] ?? null,
+                    self::MQTT_PILOT_MAX_CORE_TRANSITIONS
+                ),
+                -self::MQTT_PILOT_MAX_CORE_TRANSITIONS
+            ),
+            'openEpisode' => $this->mqttPilotStorageEpisode(
                 $registry['openEpisode'] ?? null
-            ) ? $registry['openEpisode'] : null,
+            ),
         ];
         $this->WriteAttributeString(
             'MqttPilotObservationRegistry',
             $this->encodeResult($registry)
         );
+    }
+
+    private function mqttPilotStorageEpisodes(mixed $value): array
+    {
+        if (!is_array($value)) {
+            return [];
+        }
+        $result = [];
+        foreach (
+            array_slice(
+                $value,
+                -self::MQTT_PILOT_MAX_EPISODES
+            ) as $entry
+        ) {
+            $stored = $this->mqttPilotStorageEpisode($entry);
+            if ($stored !== null) {
+                $result[] = $stored;
+            }
+        }
+
+        return $result;
+    }
+
+    private function mqttPilotStorageEpisode(mixed $value): ?array
+    {
+        $projected = $this->mqttPilotDiagnosticEpisode($value);
+        if ($projected === null) {
+            return null;
+        }
+        $projected['kernelStartTime'] = $this->mqttDiagnosticInteger(
+            is_array($value) ? ($value['kernelStartTime'] ?? null) : null
+        );
+
+        return $projected;
     }
 
     private function mqttPilotDiagnosticProjection(): array
@@ -3652,7 +4166,7 @@ class NavimowAccount extends IPSModule
         );
 
         return [
-            'formatVersion' => 1,
+            'formatVersion' => 2,
             'featureEnabled' =>
                 $this->ReadPropertyBoolean('EnableMqttShadow'),
             'active' => ($registry['active'] ?? false) === true,
@@ -3681,6 +4195,14 @@ class NavimowAccount extends IPSModule
             ),
             'rotations' => $this->mqttPilotDiagnosticRotations(
                 $registry['rotations'] ?? null
+            ),
+            'coreTransitions' =>
+                $this->mqttPilotDiagnosticCoreTransitions(
+                    $registry['coreTransitions'] ?? null,
+                    self::MQTT_PILOT_MAX_CORE_TRANSITIONS
+                ),
+            'coreStatusEventDrops' => $this->mqttDiagnosticInteger(
+                $this->mqttStatistics()['coreStatusEventDrops'] ?? null
             ),
             'openEpisode' => $this->mqttPilotDiagnosticEpisode(
                 $registry['openEpisode'] ?? null
@@ -3837,6 +4359,71 @@ class NavimowAccount extends IPSModule
             'webSocketStatus' => $this->mqttDiagnosticInteger(
                 $value['webSocketStatus'] ?? null
             ),
+            'coreFaultObservedAt' => $this->mqttDiagnosticInteger(
+                $value['coreFaultObservedAt'] ?? null
+            ),
+            'coreFaultLeadSeconds' => $this->mqttDiagnosticInteger(
+                $value['coreFaultLeadSeconds'] ?? null
+            ),
+            'reconnectScheduledAt' => $this->mqttDiagnosticInteger(
+                $value['reconnectScheduledAt'] ?? null
+            ),
+            'reconnectDueAt' => $this->mqttDiagnosticInteger(
+                $value['reconnectDueAt'] ?? null
+            ),
+            'reconnectStartedAt' => $this->mqttDiagnosticInteger(
+                $value['reconnectStartedAt'] ?? null
+            ),
+            'coreReadyAt' => $this->mqttDiagnosticInteger(
+                $value['coreReadyAt'] ?? null
+            ),
+            'coreReadySource' => $this->mqttDiagnosticCode(
+                $value['coreReadySource'] ?? 'unknown',
+                [
+                    'status-message',
+                    'lifecycle-observation',
+                    'unknown',
+                ]
+            ),
+            'recoveryConfirmationLagSeconds' =>
+                $this->mqttDiagnosticInteger(
+                    $value['recoveryConfirmationLagSeconds'] ?? null
+                ),
+            'lastMqttReceivedAt' => $this->mqttDiagnosticInteger(
+                $value['lastMqttReceivedAt'] ?? null
+            ),
+            'mqttIngressAgeSeconds' => $this->mqttDiagnosticInteger(
+                $value['mqttIngressAgeSeconds'] ?? null
+            ),
+            'mqttIngressSeen' =>
+                ($value['mqttIngressSeen'] ?? false) === true,
+            'lastRestSuccessAt' => $this->mqttDiagnosticInteger(
+                $value['lastRestSuccessAt'] ?? null
+            ),
+            'restSuccessAgeSeconds' => $this->mqttDiagnosticInteger(
+                $value['restSuccessAgeSeconds'] ?? null
+            ),
+            'restSuccessSeen' =>
+                ($value['restSuccessSeen'] ?? false) === true,
+            'restConnectionState' => $this->mqttDiagnosticInteger(
+                $value['restConnectionState'] ?? null
+            ),
+            'nearestPriorRotationAt' => $this->mqttDiagnosticInteger(
+                $value['nearestPriorRotationAt'] ?? null
+            ),
+            'rotationSeparationSeconds' =>
+                $this->mqttDiagnosticInteger(
+                    $value['rotationSeparationSeconds'] ?? null
+                ),
+            'coreTransitions' =>
+                $this->mqttPilotDiagnosticCoreTransitions(
+                    $value['coreTransitions'] ?? null,
+                    self::MQTT_PILOT_MAX_EPISODE_CORE_TRANSITIONS
+                ),
+            'diagnosticCompleteness' => $this->mqttDiagnosticCode(
+                $value['diagnosticCompleteness'] ?? 'legacy',
+                ['complete', 'polling-fallback', 'legacy', 'partial']
+            ),
             'reconnectAttemptsUsed' => $this->mqttDiagnosticInteger(
                 $value['reconnectAttemptsUsed'] ?? null
             ),
@@ -3861,6 +4448,58 @@ class NavimowAccount extends IPSModule
             'kernelEpochChanged' =>
                 ($value['kernelEpochChanged'] ?? false) === true,
         ];
+    }
+
+    private function mqttPilotDiagnosticCoreTransitions(
+        mixed $value,
+        int $limit
+    ): array {
+        if (!is_array($value)) {
+            return [];
+        }
+        $result = [];
+        foreach (array_slice($value, -max(0, $limit)) as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            $result[] = [
+                'sequence' => $this->mqttDiagnosticInteger(
+                    $entry['sequence'] ?? null
+                ),
+                'sessionSequence' => $this->mqttDiagnosticInteger(
+                    $entry['sessionSequence'] ?? null
+                ),
+                'observedAt' => $this->mqttDiagnosticInteger(
+                    $entry['observedAt'] ?? null
+                ),
+                'senderRole' => $this->mqttDiagnosticCode(
+                    $entry['senderRole'] ?? null,
+                    ['mqtt', 'websocket']
+                ),
+                'mqttStatus' => $this->mqttDiagnosticInteger(
+                    $entry['mqttStatus'] ?? null
+                ),
+                'webSocketStatus' => $this->mqttDiagnosticInteger(
+                    $entry['webSocketStatus'] ?? null
+                ),
+                'classification' => $this->mqttDiagnosticCode(
+                    $entry['classification'] ?? null,
+                    [
+                        'healthy',
+                        'inactive',
+                        'error',
+                        'transitioning',
+                        'unknown',
+                    ]
+                ),
+                'openEpisodeSequence' =>
+                    $this->mqttDiagnosticInteger(
+                        $entry['openEpisodeSequence'] ?? null
+                    ),
+            ];
+        }
+
+        return $result;
     }
 
     private function mqttPilotDiagnosticRotations(mixed $value): array
