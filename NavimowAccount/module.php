@@ -59,6 +59,7 @@ class NavimowAccount extends IPSModule
     private const MQTT_PILOT_MAX_ROTATIONS = 64;
     private const MQTT_PILOT_MAX_CORE_TRANSITIONS = 32;
     private const MQTT_PILOT_MAX_EPISODE_CORE_TRANSITIONS = 8;
+    private const MQTT_PILOT_SUMMARY_MAX_BYTES = 16384;
     private const MQTT_PILOT_CORE_TRANSITION_LOOKBACK_SECONDS = 120;
     private const MQTT_LIFECYCLE_DISABLED = 'Disabled';
     private const MQTT_LIFECYCLE_WAITING_FOR_AUTHENTICATION =
@@ -772,6 +773,13 @@ class NavimowAccount extends IPSModule
     {
         return $this->encodeResult(
             $this->mqttPilotDiagnosticProjection()
+        );
+    }
+
+    public function GetMqttPilotSummary(): string
+    {
+        return $this->encodeMqttPilotSummary(
+            $this->mqttPilotSummaryProjection()
         );
     }
 
@@ -4187,6 +4195,18 @@ class NavimowAccount extends IPSModule
             ),
             'checkpointIntervalSeconds' =>
                 self::MQTT_PILOT_CHECKPOINT_SECONDS,
+            'checkpointSequence' => $this->mqttDiagnosticInteger(
+                $registry['checkpointSequence'] ?? null
+            ),
+            'episodeSequence' => $this->mqttDiagnosticInteger(
+                $registry['episodeSequence'] ?? null
+            ),
+            'rotationSequence' => $this->mqttDiagnosticInteger(
+                $registry['rotationSequence'] ?? null
+            ),
+            'coreTransitionSequence' => $this->mqttDiagnosticInteger(
+                $registry['coreTransitionSequence'] ?? null
+            ),
             'checkpoints' => $this->mqttPilotDiagnosticCheckpoints(
                 $registry['checkpoints'] ?? null
             ),
@@ -4208,6 +4228,138 @@ class NavimowAccount extends IPSModule
                 $registry['openEpisode'] ?? null
             ),
         ];
+    }
+
+    private function mqttPilotSummaryProjection(): array
+    {
+        $registry = $this->decodeMqttDiagnosticAttribute(
+            'MqttPilotObservationRegistry'
+        );
+        $statistics = $this->mqttStatistics();
+        $checkpoints = $this->mqttPilotDiagnosticCheckpoints(
+            $registry['checkpoints'] ?? null
+        );
+        $episodes = $this->mqttPilotDiagnosticEpisodes(
+            $registry['episodes'] ?? null
+        );
+        $rotations = $this->mqttPilotDiagnosticRotations(
+            $registry['rotations'] ?? null
+        );
+        $coreTransitions = $this->mqttPilotDiagnosticCoreTransitions(
+            $registry['coreTransitions'] ?? null,
+            self::MQTT_PILOT_MAX_CORE_TRANSITIONS
+        );
+
+        return [
+            'formatVersion' => 1,
+            'featureEnabled' =>
+                $this->ReadPropertyBoolean('EnableMqttShadow'),
+            'active' => ($registry['active'] ?? false) === true,
+            'sessionSequence' => $this->mqttDiagnosticInteger(
+                $registry['sessionSequence'] ?? null
+            ),
+            'startedAt' => $this->mqttDiagnosticInteger(
+                $registry['startedAt'] ?? null
+            ),
+            'stoppedAt' => $this->mqttDiagnosticInteger(
+                $registry['stoppedAt'] ?? null
+            ),
+            'lastCheckpointAt' => $this->mqttDiagnosticInteger(
+                $registry['lastCheckpointAt'] ?? null
+            ),
+            'nextCheckpointAt' => $this->mqttDiagnosticInteger(
+                $registry['nextCheckpointAt'] ?? null
+            ),
+            'checkpointIntervalSeconds' =>
+                self::MQTT_PILOT_CHECKPOINT_SECONDS,
+            'checkpointSequence' => $this->mqttDiagnosticInteger(
+                $registry['checkpointSequence'] ?? null
+            ),
+            'episodeSequence' => $this->mqttDiagnosticInteger(
+                $registry['episodeSequence'] ?? null
+            ),
+            'rotationSequence' => $this->mqttDiagnosticInteger(
+                $registry['rotationSequence'] ?? null
+            ),
+            'coreTransitionSequence' => $this->mqttDiagnosticInteger(
+                $registry['coreTransitionSequence'] ?? null
+            ),
+            'counters' => $this->mqttPilotSummaryCounters($statistics),
+            'checkpoints' => array_map(
+                static fn (array $checkpoint): array => [
+                    'sequence' => $checkpoint['sequence'],
+                    'sessionSequence' => $checkpoint['sessionSequence'],
+                    'recordedAt' => $checkpoint['recordedAt'],
+                    'delaySeconds' => $checkpoint['delaySeconds'],
+                ],
+                $checkpoints
+            ),
+            'latestCheckpoint' => $this->mqttPilotLatest($checkpoints),
+            'latestEpisode' => $this->mqttPilotSummaryEpisode(
+                $this->mqttPilotLatest($episodes)
+            ),
+            'latestRotation' => $this->mqttPilotLatest($rotations),
+            'latestCoreTransition' =>
+                $this->mqttPilotLatest($coreTransitions),
+            'openEpisode' => $this->mqttPilotSummaryEpisode(
+                $this->mqttPilotDiagnosticEpisode(
+                    $registry['openEpisode'] ?? null
+                )
+            ),
+        ];
+    }
+
+    private function mqttPilotSummaryCounters(array $statistics): array
+    {
+        $result = [];
+        foreach (
+            [
+                'connectionAttempts',
+                'connectionSuccesses',
+                'connectionFailures',
+                'unexpectedDisconnects',
+                'reconnectAttempts',
+                'reconnectExhausted',
+                'credentialRotations',
+                'received',
+                'accepted',
+                'rejected',
+                'coreStatusEventDrops',
+            ] as $name
+        ) {
+            $result[$name] = $this->mqttDiagnosticInteger(
+                $statistics[$name] ?? null
+            );
+        }
+
+        return $result;
+    }
+
+    private function mqttPilotLatest(array $entries): ?array
+    {
+        return $entries === [] ? null : $entries[array_key_last($entries)];
+    }
+
+    private function mqttPilotSummaryEpisode(mixed $value): ?array
+    {
+        if (!is_array($value)) {
+            return null;
+        }
+        unset($value['coreTransitions']);
+
+        return $value;
+    }
+
+    private function encodeMqttPilotSummary(array $summary): string
+    {
+        $encoded = $this->encodeResult($summary);
+        if (strlen($encoded) > self::MQTT_PILOT_SUMMARY_MAX_BYTES) {
+            throw new RuntimeException(
+                'MQTT pilot summary exceeds the fixed byte limit.'
+            );
+        }
+
+        return $encoded;
     }
 
     private function mqttPilotDiagnosticCheckpoints(mixed $value): array
