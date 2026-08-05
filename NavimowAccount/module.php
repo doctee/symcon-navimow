@@ -98,6 +98,7 @@ class NavimowAccount extends IPSModule
     private const STATE_REAUTH_REQUIRED = 5;
     private const STATE_OFFLINE = 6;
     private const STATE_CONFIGURATION_ERROR = 7;
+    private const INSTANCE_STATUS_ACTIVE = 102;
 
     public function Create()
     {
@@ -200,6 +201,7 @@ class NavimowAccount extends IPSModule
             if ($kernelReconciliationRequired) {
                 $this->continueMqttKernelReconciliation();
             }
+            $this->SetStatus(self::INSTANCE_STATUS_ACTIVE);
             return;
         }
 
@@ -211,6 +213,7 @@ class NavimowAccount extends IPSModule
             if ($kernelReconciliationRequired) {
                 $this->continueMqttKernelReconciliation();
             }
+            $this->SetStatus(self::INSTANCE_STATUS_ACTIVE);
             return;
         }
 
@@ -223,10 +226,12 @@ class NavimowAccount extends IPSModule
         );
         if ($kernelReconciliationRequired) {
             $this->continueMqttKernelReconciliation();
+            $this->SetStatus(self::INSTANCE_STATUS_ACTIVE);
             return;
         }
         $this->markCurrentKernelEpochReconciled();
         $this->scheduleMqttStartupIfReady();
+        $this->SetStatus(self::INSTANCE_STATUS_ACTIVE);
     }
 
     public function MessageSink(
