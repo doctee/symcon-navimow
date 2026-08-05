@@ -23,6 +23,8 @@ final class MqttPayloadParser
         'postureX',
         'postureY',
     ];
+    private const MAX_ABSOLUTE_LOCAL_COORDINATE = 10000000.0;
+    private const MAX_ABSOLUTE_ORIENTATION = M_PI;
 
     public static function parse(
         string $topic,
@@ -153,6 +155,7 @@ final class MqttPayloadParser
         $nullFieldCount = 0;
         $unknownFieldCount = 0;
         $geometryPresent = false;
+        $geometry = [];
 
         foreach ($entry as $name => $value) {
             if ($value === null) {
@@ -164,7 +167,16 @@ final class MqttPayloadParser
             }
 
             if (in_array($name, self::GEOMETRY_FIELDS, true)) {
-                self::finiteNumber('geometry', $value);
+                $number = self::finiteNumber('geometry', $value);
+                $bound = $name === 'postureTheta'
+                    ? self::MAX_ABSOLUTE_ORIENTATION
+                    : self::MAX_ABSOLUTE_LOCAL_COORDINATE;
+                if (abs($number) > $bound) {
+                    throw new MqttPayloadException(
+                        'MQTT geometry field is outside the allowed bounds.'
+                    );
+                }
+                $geometry[$name] = $number;
                 $geometryPresent = true;
                 continue;
             }
@@ -210,6 +222,26 @@ final class MqttPayloadParser
             $unknownFieldCount++;
         }
 
+        $pose = null;
+        if (
+            $sourceTimestamp !== null
+            && isset(
+                $geometry['postureX'],
+                $geometry['postureY'],
+                $geometry['postureTheta']
+            )
+            && is_int($fields['locationVehicleStateCode'] ?? null)
+        ) {
+            $pose = [
+                'localX' => $geometry['postureX'],
+                'localY' => $geometry['postureY'],
+                'orientation' => $geometry['postureTheta'],
+                'sourceTimestamp' => $sourceTimestamp,
+                'vehicleStateCode' =>
+                    $fields['locationVehicleStateCode'],
+            ];
+        }
+
         return [
             'fields' => $fields,
             'sourceTimestamp' => $sourceTimestamp,
@@ -220,6 +252,7 @@ final class MqttPayloadParser
             'nullFieldCount' => $nullFieldCount,
             'unknownFieldCount' => $unknownFieldCount,
             'geometryPresent' => $geometryPresent,
+            'pose' => $pose,
         ];
     }
 

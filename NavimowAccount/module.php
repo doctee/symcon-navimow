@@ -10,6 +10,7 @@ require_once __DIR__ . '/../libs/Navimow/MqttCredentialMapper.php';
 require_once __DIR__ . '/../libs/Navimow/MqttPartialStateAccumulator.php';
 require_once __DIR__ . '/../libs/Navimow/MqttPayloadException.php';
 require_once __DIR__ . '/../libs/Navimow/MqttPayloadParser.php';
+require_once __DIR__ . '/../libs/Navimow/MqttPositionDiagnostic.php';
 require_once __DIR__ . '/../libs/Navimow/MqttTransportConfiguration.php';
 require_once __DIR__ . '/../libs/Navimow/OAuthHelper.php';
 require_once __DIR__ . '/../libs/Navimow/PayloadMapper.php';
@@ -112,6 +113,10 @@ class NavimowAccount extends IPSModule
         $this->RegisterPropertyInteger('ActivePollInterval', 60);
         $this->RegisterPropertyBoolean('DebugPayloads', false);
         $this->RegisterPropertyBoolean('EnableMqttShadow', false);
+        $this->RegisterPropertyBoolean(
+            'EnableMqttPositionDiagnostics',
+            false
+        );
         $this->RegisterPropertyInteger('MqttReceiverInstanceId', 0);
 
         $this->RegisterAttributeString('AccessToken', '');
@@ -128,6 +133,7 @@ class NavimowAccount extends IPSModule
         $this->RegisterAttributeString('MqttStatistics', '{}');
         $this->RegisterAttributeString('MqttErrorHistory', '[]');
         $this->RegisterAttributeString('MqttShadowState', '{}');
+        $this->RegisterAttributeString('MqttPositionDiagnostic', '{}');
         $this->RegisterAttributeString('MqttPendingReconciliation', '{}');
         $this->RegisterAttributeString(
             'MqttPilotObservationRegistry',
@@ -772,6 +778,103 @@ class NavimowAccount extends IPSModule
                     $this->mqttDiagnosticShadowObservation($shadow),
             ],
         ]);
+    }
+
+    public function GetMqttPositionDiagnostics(): string
+    {
+        $enabled = $this->ReadPropertyBoolean(
+            'EnableMqttPositionDiagnostics'
+        );
+        $shadowEnabled = $this->ReadPropertyBoolean('EnableMqttShadow');
+        $base = [
+            'formatVersion' => 1,
+            'featureEnabled' => $enabled,
+            'transportEnabled' => $shadowEnabled,
+            'authority' => 'diagnostic-only',
+            'coordinateSystem' => 'local-map',
+        ];
+        if (!$enabled) {
+            return $this->encodeResult($base + [
+                'status' => 'disabled',
+                'trackedDeviceCount' => 0,
+                'observation' => null,
+            ]);
+        }
+        if (!$shadowEnabled) {
+            return $this->encodeResult($base + [
+                'status' => 'inactive',
+                'trackedDeviceCount' => 0,
+                'observation' => null,
+            ]);
+        }
+
+        try {
+            $encoded = $this->ReadAttributeString(
+                'MqttPositionDiagnostic'
+            );
+            if (
+                strlen($encoded)
+                    > self::MQTT_DIAGNOSTIC_ATTRIBUTE_MAX_BYTES
+            ) {
+                throw new Navimow\MqttPayloadException(
+                    'MQTT position diagnostic root exceeds the limit.'
+                );
+            }
+            $root = json_decode(
+                $encoded,
+                true,
+                32,
+                JSON_THROW_ON_ERROR
+            );
+            if (
+                !is_array($root)
+                || ($root['formatVersion'] ?? null) !== 1
+                || !array_key_exists('deviceKey', $root)
+                || (
+                    $root['deviceKey'] !== null
+                    && (
+                        !is_string($root['deviceKey'])
+                        || preg_match(
+                            '/^[a-f0-9]{64}$/D',
+                            $root['deviceKey']
+                        ) !== 1
+                    )
+                )
+                || !is_int($root['conflictingDeviceCount'] ?? null)
+                || $root['conflictingDeviceCount'] < 0
+                || !is_array($root['state'] ?? null)
+            ) {
+                throw new Navimow\MqttPayloadException(
+                    'MQTT position diagnostic root is malformed.'
+                );
+            }
+
+            $trackedDeviceCount = $root['deviceKey'] === null ? 0 : 1;
+            if ($root['conflictingDeviceCount'] > 0) {
+                return $this->encodeResult($base + [
+                    'status' => 'ambiguous',
+                    'trackedDeviceCount' => $trackedDeviceCount,
+                    'observation' => null,
+                ]);
+            }
+
+            return $this->encodeResult($base + [
+                'status' => $trackedDeviceCount === 0
+                    ? 'unavailable'
+                    : 'available',
+                'trackedDeviceCount' => $trackedDeviceCount,
+                'observation' => Navimow\MqttPositionDiagnostic::project(
+                    $root['state'],
+                    $this->currentTimestamp()
+                ),
+            ]);
+        } catch (Throwable) {
+            return $this->encodeResult($base + [
+                'status' => 'invalid',
+                'trackedDeviceCount' => 0,
+                'observation' => null,
+            ]);
+        }
     }
 
     public function GetMqttPilotDiagnostics(): string
@@ -1773,6 +1876,22 @@ class NavimowAccount extends IPSModule
                 'entries' => [],
             ])
         );
+        $this->WriteAttributeString(
+            'MqttPositionDiagnostic',
+            $this->encodeResult(
+                $this->initialMqttPositionDiagnosticRoot()
+            )
+        );
+    }
+
+    private function initialMqttPositionDiagnosticRoot(): array
+    {
+        return [
+            'formatVersion' => 1,
+            'deviceKey' => null,
+            'conflictingDeviceCount' => 0,
+            'state' => Navimow\MqttPositionDiagnostic::initialState(),
+        ];
     }
 
     private function inspectMqttShadowConfiguration(): array
@@ -3477,6 +3596,7 @@ class NavimowAccount extends IPSModule
         $lifecycle = $this->mqttLifecycle();
         $statistics = $this->mqttStatistics();
         $validation = $this->inspectMqttShadowConfiguration();
+        $positionCheckpoint = $this->mqttPositionCheckpointProjection();
         $checkpointSequence = $this->incrementMqttCounter(
             $registry['checkpointSequence'] ?? null
         );
@@ -3539,6 +3659,15 @@ class NavimowAccount extends IPSModule
             'accepted' => $this->mqttDiagnosticInteger(
                 $statistics['accepted'] ?? null
             ),
+            'positionAvailable' => $positionCheckpoint['available'],
+            'positionReceivedSamples' =>
+                $positionCheckpoint['receivedSamples'],
+            'positionCoordinateChanges' =>
+                $positionCheckpoint['coordinateChanges'],
+            'positionOutOfOrderTimestamps' =>
+                $positionCheckpoint['outOfOrderTimestamps'],
+            'positionRetainedSamples' =>
+                $positionCheckpoint['retainedSamples'],
         ];
         $registry['checkpointSequence'] = $checkpointSequence;
         $registry['checkpoints'] = array_slice(
@@ -3556,6 +3685,61 @@ class NavimowAccount extends IPSModule
             'MqttPilotCheckpoint',
             max(1, $nextCheckpointAt - $now) * 1000
         );
+    }
+
+    private function mqttPositionCheckpointProjection(): array
+    {
+        $empty = [
+            'available' => false,
+            'receivedSamples' => 0,
+            'coordinateChanges' => 0,
+            'outOfOrderTimestamps' => 0,
+            'retainedSamples' => 0,
+        ];
+        if (
+            !$this->ReadPropertyBoolean('EnableMqttPositionDiagnostics')
+        ) {
+            return $empty;
+        }
+
+        try {
+            $root = $this->decodeMqttAttribute(
+                'MqttPositionDiagnostic',
+                $this->initialMqttPositionDiagnosticRoot()
+            );
+            if (
+                !is_string($root['deviceKey'] ?? null)
+                || ($root['conflictingDeviceCount'] ?? 0) !== 0
+                || !is_array($root['state'] ?? null)
+            ) {
+                return $empty;
+            }
+            $projection = Navimow\MqttPositionDiagnostic::project(
+                $root['state'],
+                $this->currentTimestamp()
+            );
+            $counters = $projection['counters'];
+            $summary = $projection['trackSummary'];
+
+            return [
+                'available' =>
+                    ($projection['availability'] ?? null) === 'available',
+                'receivedSamples' => $this->mqttDiagnosticInteger(
+                    $counters['receivedSampleCount'] ?? null
+                ),
+                'coordinateChanges' => $this->mqttDiagnosticInteger(
+                    $summary['coordinateChangeCount'] ?? null
+                ),
+                'outOfOrderTimestamps' => $this->mqttDiagnosticInteger(
+                    $counters['outOfOrderTimestampCount'] ?? null
+                ),
+                'retainedSamples' => $this->mqttDiagnosticInteger(
+                    $counters['retainedSampleCount'] ?? null
+                ),
+            ];
+        } catch (Throwable) {
+            return $empty;
+        }
     }
 
     private function recordMqttPilotEpisodeDetected(
@@ -4296,6 +4480,16 @@ class NavimowAccount extends IPSModule
                     'sessionSequence' => $checkpoint['sessionSequence'],
                     'recordedAt' => $checkpoint['recordedAt'],
                     'delaySeconds' => $checkpoint['delaySeconds'],
+                    'positionAvailable' =>
+                        $checkpoint['positionAvailable'],
+                    'positionReceivedSamples' =>
+                        $checkpoint['positionReceivedSamples'],
+                    'positionCoordinateChanges' =>
+                        $checkpoint['positionCoordinateChanges'],
+                    'positionOutOfOrderTimestamps' =>
+                        $checkpoint['positionOutOfOrderTimestamps'],
+                    'positionRetainedSamples' =>
+                        $checkpoint['positionRetainedSamples'],
                 ],
                 $checkpoints
             ),
@@ -4463,6 +4657,24 @@ class NavimowAccount extends IPSModule
                 'accepted' => $this->mqttDiagnosticInteger(
                     $entry['accepted'] ?? null
                 ),
+                'positionAvailable' =>
+                    ($entry['positionAvailable'] ?? false) === true,
+                'positionReceivedSamples' =>
+                    $this->mqttDiagnosticInteger(
+                        $entry['positionReceivedSamples'] ?? null
+                    ),
+                'positionCoordinateChanges' =>
+                    $this->mqttDiagnosticInteger(
+                        $entry['positionCoordinateChanges'] ?? null
+                    ),
+                'positionOutOfOrderTimestamps' =>
+                    $this->mqttDiagnosticInteger(
+                        $entry['positionOutOfOrderTimestamps'] ?? null
+                    ),
+                'positionRetainedSamples' =>
+                    $this->mqttDiagnosticInteger(
+                        $entry['positionRetainedSamples'] ?? null
+                    ),
             ];
         }
 
@@ -4737,6 +4949,7 @@ class NavimowAccount extends IPSModule
             : Navimow\MqttPartialStateAccumulator::initialState();
 
         $accepted = false;
+        $positionAccepted = false;
         $reconciliation = false;
         foreach ($payload['patches'] as $patch) {
             $reduced = Navimow\MqttPartialStateAccumulator::reduce(
@@ -4746,6 +4959,19 @@ class NavimowAccount extends IPSModule
             );
             $state = $reduced['state'];
             $accepted = $accepted || $reduced['accepted'];
+            if (
+                $this->ReadPropertyBoolean(
+                    'EnableMqttPositionDiagnostics'
+                )
+                && is_array($patch['pose'] ?? null)
+            ) {
+                $this->reduceMqttPositionDiagnostic(
+                    $deviceKey,
+                    $patch['pose'],
+                    $receivedAt
+                );
+                $positionAccepted = true;
+            }
             $reconciliation = $reconciliation
                 || $reduced['reconciliationHint'];
         }
@@ -4776,7 +5002,46 @@ class NavimowAccount extends IPSModule
             );
         }
 
-        return $accepted ? 'accepted' : 'reconciliation-queued';
+        return ($accepted || $positionAccepted)
+            ? 'accepted'
+            : 'reconciliation-queued';
+    }
+
+    private function reduceMqttPositionDiagnostic(
+        string $deviceKey,
+        array $pose,
+        int $receivedAt
+    ): void {
+        $root = $this->decodeMqttAttribute(
+            'MqttPositionDiagnostic',
+            $this->initialMqttPositionDiagnosticRoot()
+        );
+        $currentDeviceKey = $root['deviceKey'] ?? null;
+        if ($currentDeviceKey !== null && $currentDeviceKey !== $deviceKey) {
+            $root['conflictingDeviceCount'] = min(
+                self::MQTT_MAX_DIAGNOSTIC_COUNTER,
+                (int) ($root['conflictingDeviceCount'] ?? 0) + 1
+            );
+            $this->WriteAttributeString(
+                'MqttPositionDiagnostic',
+                $this->encodeResult($root)
+            );
+            return;
+        }
+
+        $root['deviceKey'] = $deviceKey;
+        $state = is_array($root['state'] ?? null)
+            ? $root['state']
+            : Navimow\MqttPositionDiagnostic::initialState();
+        $root['state'] = Navimow\MqttPositionDiagnostic::reduce(
+            $state,
+            $pose,
+            $receivedAt
+        );
+        $this->WriteAttributeString(
+            'MqttPositionDiagnostic',
+            $this->encodeResult($root)
+        );
     }
 
     private function queueMqttReconciliation(

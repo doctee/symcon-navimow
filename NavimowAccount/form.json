@@ -43,6 +43,11 @@
       "caption": "Enable experimental MQTT shadow"
     },
     {
+      "type": "CheckBox",
+      "name": "EnableMqttPositionDiagnostics",
+      "caption": "Enable MQTT position diagnostics"
+    },
+    {
       "type": "SelectInstance",
       "name": "MqttReceiverInstanceId",
       "caption": "Navimow MQTT Receiver",
@@ -100,6 +105,11 @@
       "type": "Button",
       "caption": "Show MQTT Pilot Diagnostics",
       "onClick": "echo NAVAC_GetMqttPilotDiagnostics($id);"
+    },
+    {
+      "type": "Button",
+      "caption": "Show MQTT Position Diagnostics",
+      "onClick": "echo NAVAC_GetMqttPositionDiagnostics($id);"
     },
     {
       "type": "Button",
