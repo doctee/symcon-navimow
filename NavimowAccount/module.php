@@ -1862,6 +1862,7 @@ class NavimowAccount extends IPSModule
 
     private function clearMqttEphemeralState(): void
     {
+        $this->preserveMqttPilotPositionAccountingBeforeClear();
         $this->WriteAttributeString(
             'MqttShadowState',
             $this->encodeResult([
@@ -3596,7 +3597,12 @@ class NavimowAccount extends IPSModule
         $lifecycle = $this->mqttLifecycle();
         $statistics = $this->mqttStatistics();
         $validation = $this->inspectMqttShadowConfiguration();
-        $positionCheckpoint = $this->mqttPositionCheckpointProjection();
+        $positionSegment = $this->mqttPositionSegmentProjection();
+        [$registry, $positionCheckpoint] =
+            $this->accumulateMqttPilotPositionAccounting(
+                $registry,
+                $positionSegment
+            );
         $checkpointSequence = $this->incrementMqttCounter(
             $registry['checkpointSequence'] ?? null
         );
@@ -3659,6 +3665,12 @@ class NavimowAccount extends IPSModule
             'accepted' => $this->mqttDiagnosticInteger(
                 $statistics['accepted'] ?? null
             ),
+            'episodeSequence' => $this->mqttDiagnosticInteger(
+                $registry['episodeSequence'] ?? null
+            ),
+            'rotationSequence' => $this->mqttDiagnosticInteger(
+                $registry['rotationSequence'] ?? null
+            ),
             'positionAvailable' => $positionCheckpoint['available'],
             'positionReceivedSamples' =>
                 $positionCheckpoint['receivedSamples'],
@@ -3668,6 +3680,10 @@ class NavimowAccount extends IPSModule
                 $positionCheckpoint['outOfOrderTimestamps'],
             'positionRetainedSamples' =>
                 $positionCheckpoint['retainedSamples'],
+            'positionSegmentSequence' =>
+                $positionCheckpoint['segmentSequence'],
+            'positionCounterResetCount' =>
+                $positionCheckpoint['counterResetCount'],
         ];
         $registry['checkpointSequence'] = $checkpointSequence;
         $registry['checkpoints'] = array_slice(
@@ -3687,7 +3703,7 @@ class NavimowAccount extends IPSModule
         );
     }
 
-    private function mqttPositionCheckpointProjection(): array
+    private function mqttPositionSegmentProjection(): array
     {
         $empty = [
             'available' => false,
@@ -3696,12 +3712,6 @@ class NavimowAccount extends IPSModule
             'outOfOrderTimestamps' => 0,
             'retainedSamples' => 0,
         ];
-        if (
-            !$this->ReadPropertyBoolean('EnableMqttPositionDiagnostics')
-        ) {
-            return $empty;
-        }
-
         try {
             $root = $this->decodeMqttAttribute(
                 'MqttPositionDiagnostic',
@@ -3740,6 +3750,185 @@ class NavimowAccount extends IPSModule
         } catch (Throwable) {
             return $empty;
         }
+    }
+
+    private function preserveMqttPilotPositionAccountingBeforeClear(): void
+    {
+        $registry = $this->mqttPilotRegistry();
+        if (($registry['active'] ?? false) !== true) {
+            return;
+        }
+
+        [$registry] = $this->accumulateMqttPilotPositionAccounting(
+            $registry,
+            $this->mqttPositionSegmentProjection(),
+            true
+        );
+        $this->writeMqttPilotRegistry($registry);
+    }
+
+    private function accumulateMqttPilotPositionAccounting(
+        array $registry,
+        array $segment,
+        bool $closeSegment = false
+    ): array {
+        $sessionSequence = $this->mqttDiagnosticInteger(
+            $registry['sessionSequence'] ?? null
+        );
+        $accounting = $this->mqttPilotPositionAccounting(
+            $registry['positionAccounting'] ?? null,
+            $sessionSequence
+        );
+
+        $receivedSamples = $this->mqttDiagnosticInteger(
+            $segment['receivedSamples'] ?? null
+        );
+        $coordinateChanges = $this->mqttDiagnosticInteger(
+            $segment['coordinateChanges'] ?? null
+        );
+        $outOfOrderTimestamps = $this->mqttDiagnosticInteger(
+            $segment['outOfOrderTimestamps'] ?? null
+        );
+        $segmentReset = $receivedSamples
+                < $accounting['lastSegmentReceivedSamples']
+            || $coordinateChanges
+                < $accounting['lastSegmentCoordinateChanges']
+            || $outOfOrderTimestamps
+                < $accounting['lastSegmentOutOfOrderTimestamps'];
+        if ($segmentReset) {
+            $accounting['segmentOpen'] = false;
+            $accounting['lastSegmentReceivedSamples'] = 0;
+            $accounting['lastSegmentCoordinateChanges'] = 0;
+            $accounting['lastSegmentOutOfOrderTimestamps'] = 0;
+        }
+        if ($receivedSamples > 0 && !$accounting['segmentOpen']) {
+            $accounting['segmentSequence'] = $this->incrementMqttCounter(
+                $accounting['segmentSequence']
+            );
+            $accounting['segmentOpen'] = true;
+        }
+
+        $accounting['receivedSamples'] = $this->mqttDiagnosticAdd(
+            $accounting['receivedSamples'],
+            max(
+                0,
+                $receivedSamples
+                    - $accounting['lastSegmentReceivedSamples']
+            )
+        );
+        $accounting['coordinateChanges'] = $this->mqttDiagnosticAdd(
+            $accounting['coordinateChanges'],
+            max(
+                0,
+                $coordinateChanges
+                    - $accounting['lastSegmentCoordinateChanges']
+            )
+        );
+        $accounting['outOfOrderTimestamps'] = $this->mqttDiagnosticAdd(
+            $accounting['outOfOrderTimestamps'],
+            max(
+                0,
+                $outOfOrderTimestamps
+                    - $accounting['lastSegmentOutOfOrderTimestamps']
+            )
+        );
+        $accounting['lastSegmentReceivedSamples'] = $receivedSamples;
+        $accounting['lastSegmentCoordinateChanges'] = $coordinateChanges;
+        $accounting['lastSegmentOutOfOrderTimestamps'] =
+            $outOfOrderTimestamps;
+
+        $projection = [
+            'available' => $accounting['receivedSamples'] > 0,
+            'receivedSamples' => $accounting['receivedSamples'],
+            'coordinateChanges' => $accounting['coordinateChanges'],
+            'outOfOrderTimestamps' =>
+                $accounting['outOfOrderTimestamps'],
+            'retainedSamples' => $this->mqttDiagnosticInteger(
+                $segment['retainedSamples'] ?? null
+            ),
+            'segmentSequence' => $accounting['segmentSequence'],
+            'counterResetCount' => max(
+                0,
+                $accounting['segmentSequence'] - 1
+            ),
+        ];
+
+        if ($closeSegment && $accounting['segmentOpen']) {
+            $accounting['segmentOpen'] = false;
+            $accounting['lastSegmentReceivedSamples'] = 0;
+            $accounting['lastSegmentCoordinateChanges'] = 0;
+            $accounting['lastSegmentOutOfOrderTimestamps'] = 0;
+        }
+        $registry['positionAccounting'] = $accounting;
+
+        return [$registry, $projection];
+    }
+
+    private function mqttPilotPositionAccounting(
+        mixed $value,
+        int $sessionSequence
+    ): array {
+        $value = is_array($value) ? $value : [];
+        if (($value['sessionSequence'] ?? null) !== $sessionSequence) {
+            $value = [];
+        }
+
+        return [
+            'sessionSequence' => $sessionSequence,
+            'receivedSamples' => $this->mqttDiagnosticInteger(
+                $value['receivedSamples'] ?? null
+            ),
+            'coordinateChanges' => $this->mqttDiagnosticInteger(
+                $value['coordinateChanges'] ?? null
+            ),
+            'outOfOrderTimestamps' => $this->mqttDiagnosticInteger(
+                $value['outOfOrderTimestamps'] ?? null
+            ),
+            'lastSegmentReceivedSamples' => $this->mqttDiagnosticInteger(
+                $value['lastSegmentReceivedSamples'] ?? null
+            ),
+            'lastSegmentCoordinateChanges' => $this->mqttDiagnosticInteger(
+                $value['lastSegmentCoordinateChanges'] ?? null
+            ),
+            'lastSegmentOutOfOrderTimestamps' =>
+                $this->mqttDiagnosticInteger(
+                    $value['lastSegmentOutOfOrderTimestamps'] ?? null
+                ),
+            'segmentSequence' => $this->mqttDiagnosticInteger(
+                $value['segmentSequence'] ?? null
+            ),
+            'segmentOpen' => ($value['segmentOpen'] ?? false) === true,
+        ];
+    }
+
+    private function mqttPilotPositionAccountingProjection(
+        mixed $value,
+        int $sessionSequence
+    ): array {
+        $accounting = $this->mqttPilotPositionAccounting(
+            $value,
+            $sessionSequence
+        );
+
+        return [
+            'receivedSamples' => $accounting['receivedSamples'],
+            'coordinateChanges' => $accounting['coordinateChanges'],
+            'outOfOrderTimestamps' =>
+                $accounting['outOfOrderTimestamps'],
+            'segmentSequence' => $accounting['segmentSequence'],
+            'counterResetCount' => max(
+                0,
+                $accounting['segmentSequence'] - 1
+            ),
+        ];
+    }
+
+    private function mqttDiagnosticAdd(int $left, int $right): int
+    {
+        return min(
+            self::MQTT_MAX_DIAGNOSTIC_COUNTER,
+            $left + $right
+        );
     }
 
     private function recordMqttPilotEpisodeDetected(
@@ -4035,6 +4224,11 @@ class NavimowAccount extends IPSModule
         $registry['nextCheckpointAt'] =
             $now + self::MQTT_PILOT_CHECKPOINT_SECONDS;
         $registry['openEpisode'] = null;
+        $registry['positionAccounting'] =
+            $this->mqttPilotPositionAccounting(
+                null,
+                $registry['sessionSequence']
+            );
         $this->writeMqttPilotRegistry($registry);
         $this->SetTimerInterval(
             'MqttPilotCheckpoint',
@@ -4251,6 +4445,13 @@ class NavimowAccount extends IPSModule
         $registry['coreTransitions'] = is_array(
             $registry['coreTransitions'] ?? null
         ) ? $registry['coreTransitions'] : [];
+        $registry['positionAccounting'] =
+            $this->mqttPilotPositionAccounting(
+                $registry['positionAccounting'] ?? null,
+                $this->mqttDiagnosticInteger(
+                    $registry['sessionSequence'] ?? null
+                )
+            );
 
         return $registry;
     }
@@ -4286,6 +4487,12 @@ class NavimowAccount extends IPSModule
             ),
             'coreTransitionSequence' => $this->mqttDiagnosticInteger(
                 $registry['coreTransitionSequence'] ?? null
+            ),
+            'positionAccounting' => $this->mqttPilotPositionAccounting(
+                $registry['positionAccounting'] ?? null,
+                $this->mqttDiagnosticInteger(
+                    $registry['sessionSequence'] ?? null
+                )
             ),
             'checkpoints' => array_slice(
                 $this->mqttPilotDiagnosticCheckpoints(
@@ -4396,6 +4603,13 @@ class NavimowAccount extends IPSModule
             'coreTransitionSequence' => $this->mqttDiagnosticInteger(
                 $registry['coreTransitionSequence'] ?? null
             ),
+            'positionAccounting' =>
+                $this->mqttPilotPositionAccountingProjection(
+                    $registry['positionAccounting'] ?? null,
+                    $this->mqttDiagnosticInteger(
+                        $registry['sessionSequence'] ?? null
+                    )
+                ),
             'checkpoints' => $this->mqttPilotDiagnosticCheckpoints(
                 $registry['checkpoints'] ?? null
             ),
@@ -4473,6 +4687,13 @@ class NavimowAccount extends IPSModule
             'coreTransitionSequence' => $this->mqttDiagnosticInteger(
                 $registry['coreTransitionSequence'] ?? null
             ),
+            'positionAccounting' =>
+                $this->mqttPilotPositionAccountingProjection(
+                    $registry['positionAccounting'] ?? null,
+                    $this->mqttDiagnosticInteger(
+                        $registry['sessionSequence'] ?? null
+                    )
+                ),
             'counters' => $this->mqttPilotSummaryCounters($statistics),
             'checkpoints' => array_map(
                 static fn (array $checkpoint): array => [
@@ -4480,6 +4701,10 @@ class NavimowAccount extends IPSModule
                     'sessionSequence' => $checkpoint['sessionSequence'],
                     'recordedAt' => $checkpoint['recordedAt'],
                     'delaySeconds' => $checkpoint['delaySeconds'],
+                    'episodeSequence' =>
+                        $checkpoint['episodeSequence'],
+                    'rotationSequence' =>
+                        $checkpoint['rotationSequence'],
                     'positionAvailable' =>
                         $checkpoint['positionAvailable'],
                     'positionReceivedSamples' =>
@@ -4490,6 +4715,10 @@ class NavimowAccount extends IPSModule
                         $checkpoint['positionOutOfOrderTimestamps'],
                     'positionRetainedSamples' =>
                         $checkpoint['positionRetainedSamples'],
+                    'positionSegmentSequence' =>
+                        $checkpoint['positionSegmentSequence'],
+                    'positionCounterResetCount' =>
+                        $checkpoint['positionCounterResetCount'],
                 ],
                 $checkpoints
             ),
@@ -4657,6 +4886,12 @@ class NavimowAccount extends IPSModule
                 'accepted' => $this->mqttDiagnosticInteger(
                     $entry['accepted'] ?? null
                 ),
+                'episodeSequence' => $this->mqttDiagnosticInteger(
+                    $entry['episodeSequence'] ?? null
+                ),
+                'rotationSequence' => $this->mqttDiagnosticInteger(
+                    $entry['rotationSequence'] ?? null
+                ),
                 'positionAvailable' =>
                     ($entry['positionAvailable'] ?? false) === true,
                 'positionReceivedSamples' =>
@@ -4674,6 +4909,14 @@ class NavimowAccount extends IPSModule
                 'positionRetainedSamples' =>
                     $this->mqttDiagnosticInteger(
                         $entry['positionRetainedSamples'] ?? null
+                    ),
+                'positionSegmentSequence' =>
+                    $this->mqttDiagnosticInteger(
+                        $entry['positionSegmentSequence'] ?? null
+                    ),
+                'positionCounterResetCount' =>
+                    $this->mqttDiagnosticInteger(
+                        $entry['positionCounterResetCount'] ?? null
                     ),
             ];
         }
