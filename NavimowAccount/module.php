@@ -55,6 +55,8 @@ class NavimowAccount extends IPSModule
     private const MQTT_MAX_DIAGNOSTIC_COUNTER = 2147483647;
     private const MQTT_DIAGNOSTIC_ATTRIBUTE_MAX_BYTES = 262144;
     private const MQTT_PILOT_CHECKPOINT_SECONDS = 18000;
+    private const MQTT_PILOT_MAX_DURATION_SECONDS = 259200;
+    private const MQTT_PILOT_MAX_RECOVERABLE_EPISODES = 1;
     private const MQTT_PILOT_MAX_CHECKPOINTS = 32;
     private const MQTT_PILOT_MAX_EPISODES = 32;
     private const MQTT_PILOT_MAX_ROTATIONS = 64;
@@ -166,6 +168,16 @@ class NavimowAccount extends IPSModule
             0,
             'NAVAC_ProcessMqttPilotCheckpoint($_IPS["TARGET"]);'
         );
+        $this->RegisterTimer(
+            'MqttPilotDeadline',
+            0,
+            'NAVAC_ProcessMqttPilotDeadline($_IPS["TARGET"]);'
+        );
+        $this->RegisterTimer(
+            'MqttPilotClosure',
+            0,
+            'NAVAC_ProcessMqttPilotClosure($_IPS["TARGET"]);'
+        );
     }
 
     public function ApplyChanges()
@@ -186,8 +198,9 @@ class NavimowAccount extends IPSModule
         $this->clearMqttEphemeralState();
         $this->SetTimerInterval('MqttReconcile', 0);
         $this->SetTimerInterval('MqttLifecycle', 0);
+        $closurePending = $this->reconcileMqttPilotAutomaticClosure();
         $this->reconcileMqttPilotObservation();
-        if (!$kernelReconciliationRequired) {
+        if (!$kernelReconciliationRequired && !$closurePending) {
             if (!$this->ReadPropertyBoolean('EnableMqttShadow')) {
                 $this->disconnectOwnedMqttTransportSafely();
             } elseif (
@@ -232,6 +245,10 @@ class NavimowAccount extends IPSModule
         );
         if ($kernelReconciliationRequired) {
             $this->continueMqttKernelReconciliation();
+            $this->SetStatus(self::INSTANCE_STATUS_ACTIVE);
+            return;
+        }
+        if ($closurePending) {
             $this->SetStatus(self::INSTANCE_STATUS_ACTIVE);
             return;
         }
@@ -895,12 +912,54 @@ class NavimowAccount extends IPSModule
     {
         $this->SetTimerInterval('MqttPilotCheckpoint', 0);
         $result = $this->withMqttLifecycleLock(function (): string {
+            if ($this->requestMqttPilotDeadlineClosureIfDue()) {
+                return 'closure-requested';
+            }
             $this->recordMqttPilotCheckpoint('scheduled');
             return 'processed';
         });
-        if ($result !== 'processed') {
+        if ($result === 'closure-requested') {
+            $this->scheduleMqttPilotClosureProcessing();
+        } elseif ($result !== 'processed') {
             $this->SetTimerInterval('MqttPilotCheckpoint', 60000);
         }
+    }
+
+    public function ProcessMqttPilotDeadline(): void
+    {
+        $this->SetTimerInterval('MqttPilotDeadline', 0);
+        $result = $this->withMqttLifecycleLock(function (): string {
+            if ($this->requestMqttPilotDeadlineClosureIfDue()) {
+                return 'closure-requested';
+            }
+            $this->scheduleMqttPilotDeadline();
+            return 'scheduled';
+        });
+        if ($result === 'closure-requested') {
+            $this->scheduleMqttPilotClosureProcessing();
+        } elseif ($result !== 'scheduled') {
+            $this->SetTimerInterval('MqttPilotDeadline', 5000);
+        }
+    }
+
+    public function ProcessMqttPilotClosure(): void
+    {
+        $this->SetTimerInterval('MqttPilotClosure', 0);
+        $result = $this->withMqttLifecycleLock(
+            fn (): string => $this->clearMqttPilotCredentialsForClosure()
+        );
+        if ($result === 'retry') {
+            $this->SetTimerInterval('MqttPilotClosure', 60000);
+            return;
+        }
+        if ($result !== 'finalize-properties') {
+            if ($result !== 'closed' && $result !== 'idle') {
+                $this->SetTimerInterval('MqttPilotClosure', 5000);
+            }
+            return;
+        }
+
+        $this->finalizeMqttPilotClosureProperties();
     }
 
     public function AdoptMqttShadowChain(): string
@@ -947,6 +1006,9 @@ class NavimowAccount extends IPSModule
     private function connectMqttShadowLocked(
         string $connectionTrigger
     ): string {
+        if ($this->mqttPilotClosureIsPending()) {
+            return 'MQTT pilot closure is pending.';
+        }
         if ($this->mqttKernelReconciliationIsPending()) {
             return 'MQTT kernel reconciliation is pending.';
         }
@@ -1140,6 +1202,14 @@ class NavimowAccount extends IPSModule
 
     private function processMqttLifecycleLocked(): void
     {
+        if ($this->requestMqttPilotDeadlineClosureIfDue()) {
+            $this->scheduleMqttPilotClosureProcessing();
+            return;
+        }
+        if ($this->mqttPilotClosureIsPending()) {
+            $this->scheduleMqttPilotClosureProcessing();
+            return;
+        }
         $lifecycle = $this->mqttLifecycle();
         $now = $this->currentTimestamp();
         $scheduledKind = is_string(
@@ -1411,6 +1481,28 @@ class NavimowAccount extends IPSModule
     protected function createApiClient(): Navimow\ApiClient
     {
         return new Navimow\ApiClient($this->ReadPropertyString('BaseUrl'));
+    }
+
+    protected function setOwnProperty(string $name, mixed $value): void
+    {
+        $setProperty = $this->runtimeFunctionName('IPS', 'SetProperty');
+        if (!is_callable($setProperty)) {
+            throw new RuntimeException(
+                'Account property mutation is unavailable.'
+            );
+        }
+        $setProperty($this->InstanceID, $name, $value);
+    }
+
+    protected function applyOwnChanges(): void
+    {
+        $applyChanges = $this->runtimeFunctionName('IPS', 'ApplyChanges');
+        if (!is_callable($applyChanges)) {
+            throw new RuntimeException(
+                'Account ApplyChanges is unavailable.'
+            );
+        }
+        $applyChanges($this->InstanceID);
     }
 
     protected function currentTimestamp(): int
@@ -2985,7 +3077,8 @@ class NavimowAccount extends IPSModule
     private function scheduleMqttCredentialRotation(): void
     {
         if (
-            !$this->ReadPropertyBoolean('EnableMqttShadow')
+            $this->mqttPilotClosureIsPending()
+            || !$this->ReadPropertyBoolean('EnableMqttShadow')
             || !$this->hasUsableAccessToken()
             || $this->ReadAttributeString('MqttOwnershipRegistry') === '{}'
             || !($this->inspectMqttShadowConfiguration()['valid'] ?? false)
@@ -3011,6 +3104,9 @@ class NavimowAccount extends IPSModule
 
     private function performMqttCredentialRotation(): void
     {
+        if ($this->mqttPilotClosureIsPending()) {
+            return;
+        }
         try {
             $this->clearMqttCredentialRotationPending();
             $this->disconnectOwnedMqttTransport();
@@ -3050,6 +3146,9 @@ class NavimowAccount extends IPSModule
 
     private function scheduleMqttObservation(): void
     {
+        if ($this->mqttPilotClosureIsPending()) {
+            return;
+        }
         $lifecycle = $this->mqttLifecycle();
         $lifecycle['formatVersion'] = 1;
         $lifecycle['scheduledKind'] = 'observe';
@@ -3069,6 +3168,9 @@ class NavimowAccount extends IPSModule
         string $reason,
         string $connectionTrigger
     ): void {
+        if ($this->mqttPilotClosureIsPending()) {
+            return;
+        }
         $lifecycle = $this->mqttLifecycle();
         $lifecycle['formatVersion'] = 1;
         $lifecycle['scheduledKind'] = $kind;
@@ -3111,6 +3213,11 @@ class NavimowAccount extends IPSModule
                 self::MQTT_LIFECYCLE_DISCONNECTED,
                 'reconnect-exhausted'
             );
+            $this->requestMqttPilotClosure(
+                'reconnect-exhausted',
+                $this->currentTimestamp()
+            );
+            $this->scheduleMqttPilotClosureProcessing();
             return;
         }
         $this->scheduleMqttLifecycleAttempt(
@@ -3541,6 +3648,226 @@ class NavimowAccount extends IPSModule
         return min($value + 1, self::MQTT_MAX_DIAGNOSTIC_COUNTER);
     }
 
+    private function reconcileMqttPilotAutomaticClosure(): bool
+    {
+        $registry = $this->mqttPilotRegistry();
+        $state = is_string($registry['closureState'] ?? null)
+            ? $registry['closureState']
+            : '';
+        if (!$this->ReadPropertyBoolean('EnableMqttShadow')) {
+            $this->SetTimerInterval('MqttPilotDeadline', 0);
+            $this->SetTimerInterval('MqttPilotClosure', 0);
+            if (
+                in_array(
+                    $state,
+                    ['CredentialsCleared', 'PropertiesDisabled'],
+                    true
+                )
+            ) {
+                $registry['closureState'] = 'Closed';
+                $registry['propertiesDisabledAt'] =
+                    $this->mqttDiagnosticInteger(
+                        $registry['propertiesDisabledAt'] ?? null
+                    ) ?: $this->currentTimestamp();
+                $registry['closureCompletedAt'] =
+                    $this->currentTimestamp();
+                $this->writeMqttPilotRegistry($registry);
+            } elseif ($state === 'ClosureRequested') {
+                $this->scheduleMqttPilotClosureProcessing();
+                return true;
+            }
+            return false;
+        }
+
+        if ($this->mqttPilotClosureIsPending($registry)) {
+            $this->SetTimerInterval('MqttPilotDeadline', 0);
+            $this->scheduleMqttPilotClosureProcessing();
+            return true;
+        }
+        if ($this->requestMqttPilotDeadlineClosureIfDue()) {
+            $this->scheduleMqttPilotClosureProcessing();
+            return true;
+        }
+        $this->scheduleMqttPilotDeadline();
+
+        return false;
+    }
+
+    private function requestMqttPilotDeadlineClosureIfDue(): bool
+    {
+        $registry = $this->mqttPilotRegistry();
+        if ($this->mqttPilotClosureIsPending($registry)) {
+            return true;
+        }
+        $hardStopAt = $this->mqttDiagnosticInteger(
+            $registry['hardStopAt'] ?? null
+        );
+        if (
+            ($registry['active'] ?? false) !== true
+            || $hardStopAt <= 0
+            || $hardStopAt > $this->currentTimestamp()
+        ) {
+            return false;
+        }
+
+        $this->requestMqttPilotClosure(
+            'deadline-reached',
+            $this->currentTimestamp()
+        );
+
+        return true;
+    }
+
+    private function requestMqttPilotClosure(
+        string $reason,
+        int $timestamp
+    ): void {
+        $allowedReasons = [
+            'deadline-reached',
+            'second-transport-episode',
+            'reconnect-exhausted',
+        ];
+        if (!in_array($reason, $allowedReasons, true)) {
+            throw new InvalidArgumentException(
+                'Unsupported MQTT pilot closure reason.'
+            );
+        }
+        $registry = $this->mqttPilotRegistry();
+        if (
+            ($registry['active'] ?? false) !== true
+            && !$this->mqttPilotClosureIsPending($registry)
+        ) {
+            return;
+        }
+        if (!$this->mqttPilotClosureIsPending($registry)) {
+            $registry['closureState'] = 'ClosureRequested';
+            $registry['closureReason'] = $reason;
+            $registry['closureRequestedAt'] = max(0, $timestamp);
+            $this->writeMqttPilotRegistry($registry);
+        }
+
+        $this->SetTimerInterval('MqttReconcile', 0);
+        $this->SetTimerInterval('MqttLifecycle', 0);
+        $this->SetTimerInterval('MqttPilotCheckpoint', 0);
+        $this->SetTimerInterval('MqttPilotDeadline', 0);
+        $this->clearMqttLifecycleSchedule();
+        $this->stopMqttPilotObservation($reason, $timestamp);
+    }
+
+    private function mqttPilotClosureIsPending(?array $registry = null): bool
+    {
+        $registry ??= $this->mqttPilotRegistry();
+
+        return in_array(
+            $registry['closureState'] ?? null,
+            ['ClosureRequested', 'CredentialsCleared', 'PropertiesDisabled'],
+            true
+        );
+    }
+
+    private function scheduleMqttPilotDeadline(): void
+    {
+        $registry = $this->mqttPilotRegistry();
+        $hardStopAt = $this->mqttDiagnosticInteger(
+            $registry['hardStopAt'] ?? null
+        );
+        if (
+            !$this->ReadPropertyBoolean('EnableMqttShadow')
+            || ($registry['active'] ?? false) !== true
+            || $this->mqttPilotClosureIsPending($registry)
+            || $hardStopAt <= 0
+        ) {
+            $this->SetTimerInterval('MqttPilotDeadline', 0);
+            return;
+        }
+        $this->SetTimerInterval(
+            'MqttPilotDeadline',
+            max(1, $hardStopAt - $this->currentTimestamp()) * 1000
+        );
+    }
+
+    private function scheduleMqttPilotClosureProcessing(): void
+    {
+        $this->SetTimerInterval('MqttPilotClosure', 1000);
+    }
+
+    private function clearMqttPilotCredentialsForClosure(): string
+    {
+        $registry = $this->mqttPilotRegistry();
+        if (!$this->mqttPilotClosureIsPending($registry)) {
+            return ($registry['closureState'] ?? null) === 'Closed'
+                ? 'closed'
+                : 'idle';
+        }
+        $this->SetTimerInterval('MqttReconcile', 0);
+        $this->SetTimerInterval('MqttLifecycle', 0);
+        $this->SetTimerInterval('MqttPilotCheckpoint', 0);
+        $this->SetTimerInterval('MqttPilotDeadline', 0);
+        $this->clearMqttLifecycleSchedule();
+
+        if (($registry['closureState'] ?? null) === 'ClosureRequested') {
+            try {
+                if (
+                    $this->ReadAttributeString('MqttOwnershipRegistry')
+                        !== '{}'
+                ) {
+                    $this->disconnectOwnedMqttTransport();
+                    if (
+                        !$this->mqttTransportIsCredentialFree(
+                            $this->mqttTopology()
+                        )
+                    ) {
+                        throw new RuntimeException(
+                            'MQTT credentials remain after pilot cleanup.'
+                        );
+                    }
+                }
+            } catch (Throwable) {
+                $this->appendMqttError('credential-cleanup-skipped');
+                $this->setMqttLifecycleState(
+                    self::MQTT_LIFECYCLE_CONFIGURATION_ERROR,
+                    'pilot-closure-cleanup-failed'
+                );
+                return 'retry';
+            }
+            $registry = $this->mqttPilotRegistry();
+            $registry['closureState'] = 'CredentialsCleared';
+            $registry['credentialsClearedAt'] = $this->currentTimestamp();
+            $this->writeMqttPilotRegistry($registry);
+        }
+
+        return 'finalize-properties';
+    }
+
+    private function finalizeMqttPilotClosureProperties(): void
+    {
+        $registry = $this->mqttPilotRegistry();
+        if (!$this->mqttPilotClosureIsPending($registry)) {
+            return;
+        }
+        try {
+            $this->setOwnProperty('EnableMqttShadow', false);
+            $this->setOwnProperty(
+                'EnableMqttPositionDiagnostics',
+                false
+            );
+            $registry['closureState'] = 'PropertiesDisabled';
+            $registry['propertiesDisabledAt'] = $this->currentTimestamp();
+            $this->writeMqttPilotRegistry($registry);
+            $this->applyOwnChanges();
+        } catch (Throwable) {
+            $this->appendMqttError('credential-cleanup-skipped');
+            $this->SetTimerInterval('MqttPilotClosure', 60000);
+            return;
+        }
+
+        $registry = $this->mqttPilotRegistry();
+        $registry['closureState'] = 'Closed';
+        $registry['closureCompletedAt'] = $this->currentTimestamp();
+        $this->writeMqttPilotRegistry($registry);
+        $this->SetTimerInterval('MqttPilotClosure', 0);
+    }
+
     private function reconcileMqttPilotObservation(): void
     {
         $registry = $this->mqttPilotRegistry();
@@ -3570,6 +3897,7 @@ class NavimowAccount extends IPSModule
             'MqttPilotCheckpoint',
             max(1, $nextCheckpointAt - $now) * 1000
         );
+        $this->scheduleMqttPilotDeadline();
         $this->reconcileMqttPilotCoreStatusMessages();
     }
 
@@ -4034,6 +4362,19 @@ class NavimowAccount extends IPSModule
             'kernelEpochChanged' => false,
         ];
         $this->writeMqttPilotRegistry($registry);
+        $episodeBaseline = $this->mqttDiagnosticInteger(
+            $registry['sessionEpisodeBaseline'] ?? null
+        );
+        if (
+            $sequence - $episodeBaseline
+                > self::MQTT_PILOT_MAX_RECOVERABLE_EPISODES
+        ) {
+            $this->requestMqttPilotClosure(
+                'second-transport-episode',
+                $timestamp
+            );
+            $this->scheduleMqttPilotClosureProcessing();
+        }
     }
 
     private function recordMqttPilotCoreStatusTransition(
@@ -4219,6 +4560,18 @@ class NavimowAccount extends IPSModule
             $registry['sessionSequence'] ?? null
         );
         $registry['startedAt'] = $now;
+        $registry['hardStopAt'] =
+            $now + self::MQTT_PILOT_MAX_DURATION_SECONDS;
+        $registry['sessionEpisodeBaseline'] =
+            $this->mqttDiagnosticInteger(
+                $registry['episodeSequence'] ?? null
+            );
+        $registry['closureState'] = 'Active';
+        $registry['closureReason'] = '';
+        $registry['closureRequestedAt'] = 0;
+        $registry['credentialsClearedAt'] = 0;
+        $registry['propertiesDisabledAt'] = 0;
+        $registry['closureCompletedAt'] = 0;
         $registry['stoppedAt'] = 0;
         $registry['lastCheckpointAt'] = 0;
         $registry['nextCheckpointAt'] =
@@ -4234,6 +4587,7 @@ class NavimowAccount extends IPSModule
             'MqttPilotCheckpoint',
             self::MQTT_PILOT_CHECKPOINT_SECONDS * 1000
         );
+        $this->scheduleMqttPilotDeadline();
         $this->reconcileMqttPilotCoreStatusMessages();
     }
 
@@ -4242,6 +4596,7 @@ class NavimowAccount extends IPSModule
         int $timestamp
     ): void {
         $this->SetTimerInterval('MqttPilotCheckpoint', 0);
+        $this->SetTimerInterval('MqttPilotDeadline', 0);
         $registry = $this->mqttPilotRegistry();
         if (($registry['active'] ?? false) !== true) {
             $this->reconcileMqttPilotCoreStatusMessages();
@@ -4467,6 +4822,30 @@ class NavimowAccount extends IPSModule
             'startedAt' => $this->mqttDiagnosticInteger(
                 $registry['startedAt'] ?? null
             ),
+            'hardStopAt' => $this->mqttDiagnosticInteger(
+                $registry['hardStopAt'] ?? null
+            ),
+            'sessionEpisodeBaseline' => $this->mqttDiagnosticInteger(
+                $registry['sessionEpisodeBaseline'] ?? null
+            ),
+            'closureState' => $this->mqttPilotClosureState(
+                $registry['closureState'] ?? null
+            ),
+            'closureReason' => $this->mqttPilotClosureReason(
+                $registry['closureReason'] ?? null
+            ),
+            'closureRequestedAt' => $this->mqttDiagnosticInteger(
+                $registry['closureRequestedAt'] ?? null
+            ),
+            'credentialsClearedAt' => $this->mqttDiagnosticInteger(
+                $registry['credentialsClearedAt'] ?? null
+            ),
+            'propertiesDisabledAt' => $this->mqttDiagnosticInteger(
+                $registry['propertiesDisabledAt'] ?? null
+            ),
+            'closureCompletedAt' => $this->mqttDiagnosticInteger(
+                $registry['closureCompletedAt'] ?? null
+            ),
             'stoppedAt' => $this->mqttDiagnosticInteger(
                 $registry['stoppedAt'] ?? null
             ),
@@ -4580,6 +4959,30 @@ class NavimowAccount extends IPSModule
             'startedAt' => $this->mqttDiagnosticInteger(
                 $registry['startedAt'] ?? null
             ),
+            'hardStopAt' => $this->mqttDiagnosticInteger(
+                $registry['hardStopAt'] ?? null
+            ),
+            'sessionEpisodeBaseline' => $this->mqttDiagnosticInteger(
+                $registry['sessionEpisodeBaseline'] ?? null
+            ),
+            'closureState' => $this->mqttPilotClosureState(
+                $registry['closureState'] ?? null
+            ),
+            'closureReason' => $this->mqttPilotClosureReason(
+                $registry['closureReason'] ?? null
+            ),
+            'closureRequestedAt' => $this->mqttDiagnosticInteger(
+                $registry['closureRequestedAt'] ?? null
+            ),
+            'credentialsClearedAt' => $this->mqttDiagnosticInteger(
+                $registry['credentialsClearedAt'] ?? null
+            ),
+            'propertiesDisabledAt' => $this->mqttDiagnosticInteger(
+                $registry['propertiesDisabledAt'] ?? null
+            ),
+            'closureCompletedAt' => $this->mqttDiagnosticInteger(
+                $registry['closureCompletedAt'] ?? null
+            ),
             'stoppedAt' => $this->mqttDiagnosticInteger(
                 $registry['stoppedAt'] ?? null
             ),
@@ -4663,6 +5066,18 @@ class NavimowAccount extends IPSModule
             ),
             'startedAt' => $this->mqttDiagnosticInteger(
                 $registry['startedAt'] ?? null
+            ),
+            'hardStopAt' => $this->mqttDiagnosticInteger(
+                $registry['hardStopAt'] ?? null
+            ),
+            'closureState' => $this->mqttPilotClosureState(
+                $registry['closureState'] ?? null
+            ),
+            'closureReason' => $this->mqttPilotClosureReason(
+                $registry['closureReason'] ?? null
+            ),
+            'closureCompletedAt' => $this->mqttDiagnosticInteger(
+                $registry['closureCompletedAt'] ?? null
             ),
             'stoppedAt' => $this->mqttDiagnosticInteger(
                 $registry['stoppedAt'] ?? null
@@ -5716,6 +6131,34 @@ class NavimowAccount extends IPSModule
         return is_string($value) && in_array($value, $allowed, true)
             ? $value
             : 'unknown';
+    }
+
+    private function mqttPilotClosureState(mixed $value): string
+    {
+        return is_string($value) && in_array(
+            $value,
+            [
+                'Active',
+                'ClosureRequested',
+                'CredentialsCleared',
+                'PropertiesDisabled',
+                'Closed',
+            ],
+            true
+        ) ? $value : '';
+    }
+
+    private function mqttPilotClosureReason(mixed $value): string
+    {
+        return is_string($value) && in_array(
+            $value,
+            [
+                'deadline-reached',
+                'second-transport-episode',
+                'reconnect-exhausted',
+            ],
+            true
+        ) ? $value : '';
     }
 
     private function mqttDiagnosticCount(mixed $value, int $limit): int
