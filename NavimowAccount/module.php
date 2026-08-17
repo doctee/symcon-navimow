@@ -56,7 +56,9 @@ class NavimowAccount extends IPSModule
     private const MQTT_DIAGNOSTIC_ATTRIBUTE_MAX_BYTES = 262144;
     private const MQTT_PILOT_CHECKPOINT_SECONDS = 18000;
     private const MQTT_PILOT_MAX_DURATION_SECONDS = 259200;
-    private const MQTT_PILOT_MAX_RECOVERABLE_EPISODES = 1;
+    private const MQTT_PILOT_MAX_RECOVERABLE_INCIDENTS = 1;
+    private const MQTT_PILOT_MAX_INCIDENT_EPISODES = 3;
+    private const MQTT_PILOT_MAX_INCIDENT_SECONDS = 1800;
     private const MQTT_PILOT_MAX_CHECKPOINTS = 32;
     private const MQTT_PILOT_MAX_EPISODES = 32;
     private const MQTT_PILOT_MAX_ROTATIONS = 64;
@@ -1203,6 +1205,10 @@ class NavimowAccount extends IPSModule
     private function processMqttLifecycleLocked(): void
     {
         if ($this->requestMqttPilotDeadlineClosureIfDue()) {
+            $this->scheduleMqttPilotClosureProcessing();
+            return;
+        }
+        if ($this->requestMqttPilotIncidentClosureIfDue()) {
             $this->scheduleMqttPilotClosureProcessing();
             return;
         }
@@ -3303,6 +3309,7 @@ class NavimowAccount extends IPSModule
             'lifecycle-observation'
         );
         $this->closeMqttPilotEpisode('recovered', $timestamp);
+        $this->reconcileMqttPilotIncidentHealth($timestamp);
     }
 
     private function resetMqttReconnectEpisode(): void
@@ -3560,6 +3567,26 @@ class NavimowAccount extends IPSModule
             $lifecycle['lastTransitionReason'] = $reason;
         }
         $this->writeMqttLifecycle($lifecycle);
+        $closureReason = match ($state) {
+            self::MQTT_LIFECYCLE_REAUTHENTICATION_REQUIRED =>
+                'terminal-authentication',
+            self::MQTT_LIFECYCLE_CONFIGURATION_ERROR =>
+                'terminal-configuration',
+            default => null,
+        };
+        if ($closureReason !== null) {
+            $registry = $this->mqttPilotRegistry();
+            if (
+                ($registry['active'] ?? false) === true
+                && !$this->mqttPilotClosureIsPending($registry)
+            ) {
+                $this->requestMqttPilotClosure(
+                    $closureReason,
+                    $this->currentTimestamp()
+                );
+                $this->scheduleMqttPilotClosureProcessing();
+            }
+        }
     }
 
     private function recordMqttKernelCoreClassification(
@@ -3688,6 +3715,10 @@ class NavimowAccount extends IPSModule
             $this->scheduleMqttPilotClosureProcessing();
             return true;
         }
+        if ($this->requestMqttPilotIncidentClosureIfDue()) {
+            $this->scheduleMqttPilotClosureProcessing();
+            return true;
+        }
         $this->scheduleMqttPilotDeadline();
 
         return false;
@@ -3718,6 +3749,40 @@ class NavimowAccount extends IPSModule
         return true;
     }
 
+    private function requestMqttPilotIncidentClosureIfDue(): bool
+    {
+        $registry = $this->mqttPilotRegistry();
+        if (
+            ($registry['active'] ?? false) !== true
+            || $this->mqttPilotClosureIsPending($registry)
+        ) {
+            return $this->mqttPilotClosureIsPending($registry);
+        }
+        $incident = $this->mqttPilotIncident(
+            $registry['openIncident'] ?? null
+        );
+        if ($incident === null) {
+            return false;
+        }
+        $startedAt = $this->mqttDiagnosticInteger(
+            $incident['startedAt'] ?? null
+        );
+        if (
+            $startedAt <= 0
+            || $this->currentTimestamp() - $startedAt
+                < self::MQTT_PILOT_MAX_INCIDENT_SECONDS
+        ) {
+            return false;
+        }
+
+        $this->requestMqttPilotClosure(
+            'incident-duration-exceeded',
+            $this->currentTimestamp()
+        );
+
+        return true;
+    }
+
     private function requestMqttPilotClosure(
         string $reason,
         int $timestamp
@@ -3725,7 +3790,12 @@ class NavimowAccount extends IPSModule
         $allowedReasons = [
             'deadline-reached',
             'second-transport-episode',
+            'second-transport-incident',
+            'incident-episode-limit',
+            'incident-duration-exceeded',
             'reconnect-exhausted',
+            'terminal-authentication',
+            'terminal-configuration',
         ];
         if (!in_array($reason, $allowedReasons, true)) {
             throw new InvalidArgumentException(
@@ -4309,6 +4379,11 @@ class NavimowAccount extends IPSModule
             $registry['episodeSequence'] ?? null
         );
         $registry['episodeSequence'] = $sequence;
+        [$registry, $incidentClosureReason] =
+            $this->recordMqttPilotIncidentEpisode(
+                $registry,
+                $timestamp
+            );
         $registry['openEpisode'] = [
             'sequence' => $sequence,
             'sessionSequence' => $sessionSequence,
@@ -4362,15 +4437,9 @@ class NavimowAccount extends IPSModule
             'kernelEpochChanged' => false,
         ];
         $this->writeMqttPilotRegistry($registry);
-        $episodeBaseline = $this->mqttDiagnosticInteger(
-            $registry['sessionEpisodeBaseline'] ?? null
-        );
-        if (
-            $sequence - $episodeBaseline
-                > self::MQTT_PILOT_MAX_RECOVERABLE_EPISODES
-        ) {
+        if ($incidentClosureReason !== null) {
             $this->requestMqttPilotClosure(
-                'second-transport-episode',
+                $incidentClosureReason,
                 $timestamp
             );
             $this->scheduleMqttPilotClosureProcessing();
@@ -4566,6 +4635,10 @@ class NavimowAccount extends IPSModule
             $this->mqttDiagnosticInteger(
                 $registry['episodeSequence'] ?? null
             );
+        $registry['sessionIncidentBaseline'] =
+            $this->mqttDiagnosticInteger(
+                $registry['incidentSequence'] ?? null
+            );
         $registry['closureState'] = 'Active';
         $registry['closureReason'] = '';
         $registry['closureRequestedAt'] = 0;
@@ -4577,6 +4650,8 @@ class NavimowAccount extends IPSModule
         $registry['nextCheckpointAt'] =
             $now + self::MQTT_PILOT_CHECKPOINT_SECONDS;
         $registry['openEpisode'] = null;
+        $registry['openIncident'] = null;
+        $registry['lastIncident'] = null;
         $registry['positionAccounting'] =
             $this->mqttPilotPositionAccounting(
                 null,
@@ -4604,6 +4679,11 @@ class NavimowAccount extends IPSModule
         }
         $this->closeMqttPilotEpisode($outcome, $timestamp);
         $registry = $this->mqttPilotRegistry();
+        $registry = $this->finalizeMqttPilotIncident(
+            $registry,
+            $outcome,
+            $timestamp
+        );
         $registry['active'] = false;
         $registry['stoppedAt'] = $timestamp;
         $registry['nextCheckpointAt'] = 0;
@@ -4733,7 +4813,160 @@ class NavimowAccount extends IPSModule
             -self::MQTT_PILOT_MAX_EPISODES
         );
         $registry['openEpisode'] = null;
+        $registry = $this->recordMqttPilotIncidentEpisodeClosed(
+            $registry,
+            $outcome,
+            $timestamp,
+            $episode['reconnectAttemptsUsed']
+        );
         $this->writeMqttPilotRegistry($registry);
+    }
+
+    private function recordMqttPilotIncidentEpisode(
+        array $registry,
+        int $timestamp
+    ): array {
+        $incident = $this->mqttPilotIncident(
+            $registry['openIncident'] ?? null
+        );
+        if (
+            $incident !== null
+            && $incident['state'] === 'stabilizing'
+            && $incident['recoveryCandidateAt'] > 0
+            && $timestamp - $incident['recoveryCandidateAt']
+                >= self::MQTT_LIFECYCLE_HEALTHY_RESET_SECONDS
+        ) {
+            $registry = $this->finalizeMqttPilotIncident(
+                $registry,
+                'recovered',
+                $timestamp
+            );
+            $incident = null;
+        }
+
+        $closureReason = null;
+        if ($incident === null) {
+            $sequence = $this->incrementMqttCounter(
+                $registry['incidentSequence'] ?? null
+            );
+            $registry['incidentSequence'] = $sequence;
+            $incident = [
+                'sequence' => $sequence,
+                'sessionSequence' => $this->mqttDiagnosticInteger(
+                    $registry['sessionSequence'] ?? null
+                ),
+                'startedAt' => max(0, $timestamp),
+                'lastEpisodeAt' => max(0, $timestamp),
+                'recoveryCandidateAt' => 0,
+                'episodeCount' => 1,
+                'reconnectAttempts' => 0,
+                'state' => 'open',
+                'closedAt' => 0,
+                'durationSeconds' => 0,
+                'outcome' => 'open',
+            ];
+            $baseline = $this->mqttDiagnosticInteger(
+                $registry['sessionIncidentBaseline'] ?? null
+            );
+            if (
+                $sequence - $baseline
+                    > self::MQTT_PILOT_MAX_RECOVERABLE_INCIDENTS
+            ) {
+                $closureReason = 'second-transport-incident';
+            }
+        } else {
+            $incident['lastEpisodeAt'] = max(0, $timestamp);
+            $incident['recoveryCandidateAt'] = 0;
+            $incident['episodeCount'] = $this->incrementMqttCounter(
+                $incident['episodeCount'] ?? null
+            );
+            $incident['state'] = 'open';
+            $incident['outcome'] = 'open';
+            if (
+                $incident['episodeCount']
+                    > self::MQTT_PILOT_MAX_INCIDENT_EPISODES
+            ) {
+                $closureReason = 'incident-episode-limit';
+            }
+        }
+        $registry['openIncident'] = $incident;
+
+        return [$registry, $closureReason];
+    }
+
+    private function recordMqttPilotIncidentEpisodeClosed(
+        array $registry,
+        string $outcome,
+        int $timestamp,
+        mixed $reconnectAttempts
+    ): array {
+        $incident = $this->mqttPilotIncident(
+            $registry['openIncident'] ?? null
+        );
+        if ($incident === null) {
+            return $registry;
+        }
+        $incident['reconnectAttempts'] = $this->mqttDiagnosticAdd(
+            $incident['reconnectAttempts'],
+            $this->mqttDiagnosticInteger($reconnectAttempts)
+        );
+        if ($outcome === 'recovered') {
+            $incident['state'] = 'stabilizing';
+            $incident['recoveryCandidateAt'] = max(0, $timestamp);
+            $incident['outcome'] = 'stabilizing';
+        }
+        $registry['openIncident'] = $incident;
+
+        return $registry;
+    }
+
+    private function reconcileMqttPilotIncidentHealth(
+        int $timestamp
+    ): void {
+        $registry = $this->mqttPilotRegistry();
+        $incident = $this->mqttPilotIncident(
+            $registry['openIncident'] ?? null
+        );
+        if (
+            $incident === null
+            || $incident['state'] !== 'stabilizing'
+            || $incident['recoveryCandidateAt'] <= 0
+            || $timestamp - $incident['recoveryCandidateAt']
+                < self::MQTT_LIFECYCLE_HEALTHY_RESET_SECONDS
+        ) {
+            return;
+        }
+        $this->writeMqttPilotRegistry(
+            $this->finalizeMqttPilotIncident(
+                $registry,
+                'recovered',
+                $timestamp
+            )
+        );
+    }
+
+    private function finalizeMqttPilotIncident(
+        array $registry,
+        string $outcome,
+        int $timestamp
+    ): array {
+        $incident = $this->mqttPilotIncident(
+            $registry['openIncident'] ?? null
+        );
+        if ($incident === null) {
+            return $registry;
+        }
+        $incident['state'] = 'closed';
+        $incident['closedAt'] = max(0, $timestamp);
+        $incident['durationSeconds'] = max(
+            0,
+            $timestamp - $incident['startedAt']
+        );
+        $incident['outcome'] = $this->mqttPilotIncidentOutcome($outcome);
+        $registry['lastIncident'] = $incident;
+        $registry['openIncident'] = null;
+
+        return $registry;
     }
 
     private function recordMqttPilotRotation(int $timestamp): void
@@ -4800,6 +5033,12 @@ class NavimowAccount extends IPSModule
         $registry['coreTransitions'] = is_array(
             $registry['coreTransitions'] ?? null
         ) ? $registry['coreTransitions'] : [];
+        $registry['openIncident'] = $this->mqttPilotIncident(
+            $registry['openIncident'] ?? null
+        );
+        $registry['lastIncident'] = $this->mqttPilotIncident(
+            $registry['lastIncident'] ?? null
+        );
         $registry['positionAccounting'] =
             $this->mqttPilotPositionAccounting(
                 $registry['positionAccounting'] ?? null,
@@ -4827,6 +5066,12 @@ class NavimowAccount extends IPSModule
             ),
             'sessionEpisodeBaseline' => $this->mqttDiagnosticInteger(
                 $registry['sessionEpisodeBaseline'] ?? null
+            ),
+            'incidentSequence' => $this->mqttDiagnosticInteger(
+                $registry['incidentSequence'] ?? null
+            ),
+            'sessionIncidentBaseline' => $this->mqttDiagnosticInteger(
+                $registry['sessionIncidentBaseline'] ?? null
             ),
             'closureState' => $this->mqttPilotClosureState(
                 $registry['closureState'] ?? null
@@ -4901,6 +5146,12 @@ class NavimowAccount extends IPSModule
             'openEpisode' => $this->mqttPilotStorageEpisode(
                 $registry['openEpisode'] ?? null
             ),
+            'openIncident' => $this->mqttPilotIncident(
+                $registry['openIncident'] ?? null
+            ),
+            'lastIncident' => $this->mqttPilotIncident(
+                $registry['lastIncident'] ?? null
+            ),
         ];
         $this->WriteAttributeString(
             'MqttPilotObservationRegistry',
@@ -4940,6 +5191,84 @@ class NavimowAccount extends IPSModule
         );
 
         return $projected;
+    }
+
+    private function mqttPilotIncident(mixed $value): ?array
+    {
+        if (!is_array($value)) {
+            return null;
+        }
+        $sequence = $this->mqttDiagnosticInteger(
+            $value['sequence'] ?? null
+        );
+        $sessionSequence = $this->mqttDiagnosticInteger(
+            $value['sessionSequence'] ?? null
+        );
+        $startedAt = $this->mqttDiagnosticInteger(
+            $value['startedAt'] ?? null
+        );
+        if ($sequence <= 0 || $sessionSequence <= 0 || $startedAt <= 0) {
+            return null;
+        }
+
+        return [
+            'sequence' => $sequence,
+            'sessionSequence' => $sessionSequence,
+            'startedAt' => $startedAt,
+            'lastEpisodeAt' => $this->mqttDiagnosticInteger(
+                $value['lastEpisodeAt'] ?? null
+            ),
+            'recoveryCandidateAt' => $this->mqttDiagnosticInteger(
+                $value['recoveryCandidateAt'] ?? null
+            ),
+            'episodeCount' => $this->mqttDiagnosticInteger(
+                $value['episodeCount'] ?? null
+            ),
+            'reconnectAttempts' => $this->mqttDiagnosticInteger(
+                $value['reconnectAttempts'] ?? null
+            ),
+            'state' => $this->mqttPilotIncidentState(
+                $value['state'] ?? null
+            ),
+            'closedAt' => $this->mqttDiagnosticInteger(
+                $value['closedAt'] ?? null
+            ),
+            'durationSeconds' => $this->mqttDiagnosticInteger(
+                $value['durationSeconds'] ?? null
+            ),
+            'outcome' => $this->mqttPilotIncidentOutcome(
+                $value['outcome'] ?? null
+            ),
+        ];
+    }
+
+    private function mqttPilotIncidentProjection(mixed $value): ?array
+    {
+        $incident = $this->mqttPilotIncident($value);
+        if ($incident === null) {
+            return null;
+        }
+        $ageSeconds = $incident['state'] === 'closed'
+            ? $incident['durationSeconds']
+            : max(0, $this->currentTimestamp() - $incident['startedAt']);
+        $incident['ageSeconds'] = $ageSeconds;
+        $incident['remainingSeconds'] = $incident['state'] === 'closed'
+            ? 0
+            : max(0, self::MQTT_PILOT_MAX_INCIDENT_SECONDS - $ageSeconds);
+        $incident['healthyRemainingSeconds'] =
+            $incident['state'] === 'stabilizing'
+                && $incident['recoveryCandidateAt'] > 0
+            ? max(
+                0,
+                self::MQTT_LIFECYCLE_HEALTHY_RESET_SECONDS
+                    - (
+                        $this->currentTimestamp()
+                        - $incident['recoveryCandidateAt']
+                    )
+            )
+            : 0;
+
+        return $incident;
     }
 
     private function mqttPilotDiagnosticProjection(): array
@@ -5000,6 +5329,30 @@ class NavimowAccount extends IPSModule
             'episodeSequence' => $this->mqttDiagnosticInteger(
                 $registry['episodeSequence'] ?? null
             ),
+            'incidentSequence' => $this->mqttDiagnosticInteger(
+                $registry['incidentSequence'] ?? null
+            ),
+            'sessionIncidentBaseline' => $this->mqttDiagnosticInteger(
+                $registry['sessionIncidentBaseline'] ?? null
+            ),
+            'sessionIncidentCount' => max(
+                0,
+                $this->mqttDiagnosticInteger(
+                    $registry['incidentSequence'] ?? null
+                ) - $this->mqttDiagnosticInteger(
+                    $registry['sessionIncidentBaseline'] ?? null
+                )
+            ),
+            'incidentPolicy' => [
+                'healthyResetSeconds' =>
+                    self::MQTT_LIFECYCLE_HEALTHY_RESET_SECONDS,
+                'maximumDurationSeconds' =>
+                    self::MQTT_PILOT_MAX_INCIDENT_SECONDS,
+                'maximumEpisodes' =>
+                    self::MQTT_PILOT_MAX_INCIDENT_EPISODES,
+                'maximumRecoverableIncidents' =>
+                    self::MQTT_PILOT_MAX_RECOVERABLE_INCIDENTS,
+            ],
             'rotationSequence' => $this->mqttDiagnosticInteger(
                 $registry['rotationSequence'] ?? null
             ),
@@ -5032,6 +5385,12 @@ class NavimowAccount extends IPSModule
             ),
             'openEpisode' => $this->mqttPilotDiagnosticEpisode(
                 $registry['openEpisode'] ?? null
+            ),
+            'openIncident' => $this->mqttPilotIncidentProjection(
+                $registry['openIncident'] ?? null
+            ),
+            'lastIncident' => $this->mqttPilotIncidentProjection(
+                $registry['lastIncident'] ?? null
             ),
         ];
     }
@@ -5096,6 +5455,27 @@ class NavimowAccount extends IPSModule
             'episodeSequence' => $this->mqttDiagnosticInteger(
                 $registry['episodeSequence'] ?? null
             ),
+            'incidentSequence' => $this->mqttDiagnosticInteger(
+                $registry['incidentSequence'] ?? null
+            ),
+            'sessionIncidentCount' => max(
+                0,
+                $this->mqttDiagnosticInteger(
+                    $registry['incidentSequence'] ?? null
+                ) - $this->mqttDiagnosticInteger(
+                    $registry['sessionIncidentBaseline'] ?? null
+                )
+            ),
+            'incidentPolicy' => [
+                'healthyResetSeconds' =>
+                    self::MQTT_LIFECYCLE_HEALTHY_RESET_SECONDS,
+                'maximumDurationSeconds' =>
+                    self::MQTT_PILOT_MAX_INCIDENT_SECONDS,
+                'maximumEpisodes' =>
+                    self::MQTT_PILOT_MAX_INCIDENT_EPISODES,
+                'maximumRecoverableIncidents' =>
+                    self::MQTT_PILOT_MAX_RECOVERABLE_INCIDENTS,
+            ],
             'rotationSequence' => $this->mqttDiagnosticInteger(
                 $registry['rotationSequence'] ?? null
             ),
@@ -5148,6 +5528,12 @@ class NavimowAccount extends IPSModule
                 $this->mqttPilotDiagnosticEpisode(
                     $registry['openEpisode'] ?? null
                 )
+            ),
+            'openIncident' => $this->mqttPilotIncidentProjection(
+                $registry['openIncident'] ?? null
+            ),
+            'lastIncident' => $this->mqttPilotIncidentProjection(
+                $registry['lastIncident'] ?? null
             ),
         ];
     }
@@ -6155,10 +6541,46 @@ class NavimowAccount extends IPSModule
             [
                 'deadline-reached',
                 'second-transport-episode',
+                'second-transport-incident',
+                'incident-episode-limit',
+                'incident-duration-exceeded',
                 'reconnect-exhausted',
+                'terminal-authentication',
+                'terminal-configuration',
             ],
             true
         ) ? $value : '';
+    }
+
+    private function mqttPilotIncidentState(mixed $value): string
+    {
+        return is_string($value) && in_array(
+            $value,
+            ['open', 'stabilizing', 'closed'],
+            true
+        ) ? $value : 'open';
+    }
+
+    private function mqttPilotIncidentOutcome(mixed $value): string
+    {
+        return is_string($value) && in_array(
+            $value,
+            [
+                'open',
+                'stabilizing',
+                'recovered',
+                'disabled',
+                'deadline-reached',
+                'second-transport-episode',
+                'second-transport-incident',
+                'incident-episode-limit',
+                'incident-duration-exceeded',
+                'reconnect-exhausted',
+                'terminal-authentication',
+                'terminal-configuration',
+            ],
+            true
+        ) ? $value : 'unknown';
     }
 
     private function mqttDiagnosticCount(mixed $value, int $limit): int
