@@ -12,6 +12,10 @@ final class MqttPayloadParser
     private const MAX_JSON_DEPTH = 32;
     private const MAX_LOCATION_ENTRIES = 64;
     private const MAX_FIELDS_PER_ENTRY = 64;
+    private const MAX_PARTITION_IDS = 64;
+    private const MAX_TASK_CODE = 1000000;
+    private const MAX_TASK_PROGRESS = 10000;
+    private const MAX_AREA_VALUE = 1000000000.0;
     private const CHANNELS = [
         'state',
         'event',
@@ -61,7 +65,7 @@ final class MqttPayloadParser
         }
 
         if ($channel === 'location') {
-            $patches = self::parseLocation($decoded);
+            $patches = self::parseLocation($decoded, $receivedAt);
         } elseif ($channel === 'state') {
             $patches = [
                 self::parseState($decoded, $expectedDeviceId),
@@ -113,8 +117,10 @@ final class MqttPayloadParser
         );
     }
 
-    private static function parseLocation(mixed $decoded): array
-    {
+    private static function parseLocation(
+        mixed $decoded,
+        int $receivedAt
+    ): array {
         if (
             !is_array($decoded)
             || !array_is_list($decoded)
@@ -142,20 +148,25 @@ final class MqttPayloadParser
                     'MQTT location entry must be a bounded non-empty object.'
                 );
             }
-            $patches[] = self::parseLocationEntry($entry);
+            $patches[] = self::parseLocationEntry($entry, $receivedAt);
         }
 
         return $patches;
     }
 
-    private static function parseLocationEntry(array $entry): array
-    {
+    private static function parseLocationEntry(
+        array $entry,
+        int $receivedAt
+    ): array {
         $fields = [];
+        $areaIdentity = [];
         $sourceTimestamp = null;
         $nullFieldCount = 0;
         $unknownFieldCount = 0;
         $geometryPresent = false;
         $geometry = [];
+        $taskTelemetryPresent = false;
+        $receiptTimestampAllowed = false;
 
         foreach ($entry as $name => $value) {
             if ($value === null) {
@@ -212,14 +223,131 @@ final class MqttPayloadParser
             }
 
             if ($name === 'mowingPercentage') {
-                $fields['mowingPercentage'] = self::finiteNumber(
+                $percentage = self::finiteNumber(
                     'mowing percentage',
                     $value
                 );
+                if ($percentage < 0 || $percentage > 100) {
+                    throw new MqttPayloadException(
+                        'MQTT mowing percentage is outside the allowed bounds.'
+                    );
+                }
+                $fields['mowingPercentage'] = $percentage;
+                $taskTelemetryPresent = true;
+                continue;
+            }
+
+            if ($name === 'action' || $name === 'subAction') {
+                $fields[$name] = self::boundedInteger(
+                    'task action',
+                    $value,
+                    -1,
+                    self::MAX_TASK_CODE
+                );
+                $taskTelemetryPresent = true;
+                continue;
+            }
+
+            if ($name === 'mowStartType') {
+                $fields['mowStartType'] = self::boundedInteger(
+                    'mow start type',
+                    $value,
+                    0,
+                    self::MAX_TASK_CODE
+                );
+                $taskTelemetryPresent = true;
+                continue;
+            }
+
+            if ($name === 'currentMowProgress') {
+                $fields['currentMowProgress'] = self::boundedInteger(
+                    'current mow progress',
+                    $value,
+                    0,
+                    self::MAX_TASK_PROGRESS
+                );
+                $taskTelemetryPresent = true;
+                continue;
+            }
+
+            if ($name === 'subtotalArea' || $name === 'mowingWeekArea') {
+                $area = self::finiteNumber('task area', $value);
+                if ($area < 0 || $area > self::MAX_AREA_VALUE) {
+                    throw new MqttPayloadException(
+                        'MQTT task area is outside the allowed bounds.'
+                    );
+                }
+                $fields[$name] = $area;
+                $taskTelemetryPresent = true;
+                continue;
+            }
+
+            if ($name === 'currentMowBoundary') {
+                $areaIdentity['boundaryId'] = self::boundedInteger(
+                    'mow boundary identifier',
+                    $value,
+                    0,
+                    self::MAX_TASK_CODE
+                );
+                $taskTelemetryPresent = true;
+                continue;
+            }
+
+            if ($name === 'partitionIds') {
+                if (
+                    !is_array($value)
+                    || !array_is_list($value)
+                    || $value === []
+                    || count($value) > self::MAX_PARTITION_IDS
+                ) {
+                    throw new MqttPayloadException(
+                        'MQTT partition identifiers must be a bounded non-empty list.'
+                    );
+                }
+                $partitionIds = [];
+                foreach ($value as $partitionId) {
+                    $partitionIds[] = self::boundedInteger(
+                        'partition identifier',
+                        $partitionId,
+                        0,
+                        self::MAX_TASK_CODE
+                    );
+                }
+                $areaIdentity['partitionIds'] = $partitionIds;
+                $taskTelemetryPresent = true;
+                continue;
+            }
+
+            if ($name === 'taskDelay') {
+                if (!is_bool($value)) {
+                    throw new MqttPayloadException(
+                        'MQTT task delay must be boolean.'
+                    );
+                }
+                $fields['taskDelay'] = $value;
+                $taskTelemetryPresent = true;
+                $receiptTimestampAllowed = true;
+                continue;
+            }
+
+            if ($name === 'mapWorkPosition') {
+                if (
+                    !is_string($value)
+                    || preg_match('/^[a-fA-F0-9]{128}$/D', $value) !== 1
+                ) {
+                    throw new MqttPayloadException(
+                        'MQTT opaque work position is invalid.'
+                    );
+                }
+                $taskTelemetryPresent = true;
                 continue;
             }
 
             $unknownFieldCount++;
+        }
+
+        if ($taskTelemetryPresent) {
+            $fields['taskTelemetryReceivedAt'] = $receivedAt;
         }
 
         $pose = null;
@@ -246,9 +374,15 @@ final class MqttPayloadParser
             'fields' => $fields,
             'sourceTimestamp' => $sourceTimestamp,
             'classification' => $sourceTimestamp === null
-                ? 'missing-timestamp'
+                ? ($receiptTimestampAllowed
+                    ? 'receipt-timestamped-task'
+                    : 'missing-timestamp')
                 : 'location',
             'reconciliationHint' => true,
+            'receiptTimestampAllowed' => $receiptTimestampAllowed,
+            'areaIdentity' => $areaIdentity === []
+                ? null
+                : $areaIdentity,
             'nullFieldCount' => $nullFieldCount,
             'unknownFieldCount' => $unknownFieldCount,
             'geometryPresent' => $geometryPresent,
@@ -353,5 +487,27 @@ final class MqttPayloadParser
         }
 
         return $number;
+    }
+
+    private static function boundedInteger(
+        string $fieldClass,
+        mixed $value,
+        int $minimum,
+        int $maximum
+    ): int {
+        if (
+            !is_int($value)
+            || $value < $minimum
+            || $value > $maximum
+        ) {
+            throw new MqttPayloadException(
+                sprintf(
+                    'MQTT %s field is outside the allowed bounds.',
+                    $fieldClass
+                )
+            );
+        }
+
+        return $value;
     }
 }

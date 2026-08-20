@@ -10,11 +10,25 @@ final class MqttPartialStateAccumulator
 {
     private const FORMAT_VERSION = 1;
     private const MAX_SERIALIZED_BYTES = 4096;
+    private const MAX_TASK_CODE = 1000000;
+    private const MAX_TASK_PROGRESS = 10000;
+    private const MAX_AREA_VALUE = 1000000000.0;
     private const ALLOWED_FIELDS = [
+        'action',
         'batteryLevel',
+        'boundaryKey',
+        'currentMowProgress',
         'locationType',
         'locationVehicleStateCode',
+        'mowingWeekArea',
         'mowingPercentage',
+        'mowStartType',
+        'partitionCount',
+        'partitionKey',
+        'subAction',
+        'subtotalArea',
+        'taskDelay',
+        'taskTelemetryReceivedAt',
         'vehicleState',
     ];
 
@@ -44,11 +58,14 @@ final class MqttPartialStateAccumulator
         $sourceTimestamp = $patch['sourceTimestamp'] ?? null;
         $classification = $patch['classification'] ?? null;
         $reconciliationHint = $patch['reconciliationHint'] ?? null;
+        $receiptTimestampAllowed =
+            $patch['receiptTimestampAllowed'] ?? false;
         if (
             !is_array($fields)
             || ($sourceTimestamp !== null && !is_int($sourceTimestamp))
             || !is_string($classification)
             || !is_bool($reconciliationHint)
+            || !is_bool($receiptTimestampAllowed)
         ) {
             throw new MqttPayloadException(
                 'MQTT semantic patch is malformed.'
@@ -59,7 +76,7 @@ final class MqttPartialStateAccumulator
             if (
                 !is_string($name)
                 || !in_array($name, self::ALLOWED_FIELDS, true)
-                || (!is_int($value) && !is_float($value))
+                || !self::validFieldValue($name, $value)
             ) {
                 throw new MqttPayloadException(
                     'MQTT semantic patch contains an unsupported field.'
@@ -67,7 +84,7 @@ final class MqttPartialStateAccumulator
             }
         }
 
-        if ($sourceTimestamp === null) {
+        if ($sourceTimestamp === null && !$receiptTimestampAllowed) {
             return self::result(
                 false,
                 'missing-timestamp',
@@ -79,7 +96,11 @@ final class MqttPartialStateAccumulator
         }
 
         $lastTimestamp = $previous['lastSourceTimestamp'];
-        if ($lastTimestamp !== null && $sourceTimestamp < $lastTimestamp) {
+        if (
+            $sourceTimestamp !== null
+            && $lastTimestamp !== null
+            && $sourceTimestamp < $lastTimestamp
+        ) {
             return self::result(
                 false,
                 'out-of-order',
@@ -103,7 +124,9 @@ final class MqttPartialStateAccumulator
         }
         ksort($next['fields']);
         sort($changedFields);
-        $next['lastSourceTimestamp'] = $sourceTimestamp;
+        if ($sourceTimestamp !== null) {
+            $next['lastSourceTimestamp'] = $sourceTimestamp;
+        }
         $next['lastReceivedAt'] = $receivedAt;
 
         return self::result(
@@ -200,13 +223,55 @@ final class MqttPartialStateAccumulator
             if (
                 !is_string($name)
                 || !in_array($name, self::ALLOWED_FIELDS, true)
-                || (!is_int($value) && !is_float($value))
+                || !self::validFieldValue($name, $value)
             ) {
                 throw new MqttPayloadException(
                     'MQTT shadow state contains an unsupported field.'
                 );
             }
         }
+    }
+
+    private static function validFieldValue(
+        string $name,
+        mixed $value
+    ): bool {
+        if ($name === 'boundaryKey' || $name === 'partitionKey') {
+            return is_string($value)
+                && preg_match('/^[a-f0-9]{64}$/D', $value) === 1;
+        }
+        if ($name === 'taskDelay') {
+            return is_bool($value);
+        }
+        if ($name === 'taskTelemetryReceivedAt') {
+            return is_int($value) && $value > 0;
+        }
+        if ($name === 'partitionCount') {
+            return is_int($value) && $value >= 0 && $value <= 64;
+        }
+        if ($name === 'currentMowProgress') {
+            return is_int($value)
+                && $value >= 0
+                && $value <= self::MAX_TASK_PROGRESS;
+        }
+        if ($name === 'action' || $name === 'subAction') {
+            return is_int($value)
+                && $value >= -1
+                && $value <= self::MAX_TASK_CODE;
+        }
+        if ($name === 'mowStartType') {
+            return is_int($value)
+                && $value >= 0
+                && $value <= self::MAX_TASK_CODE;
+        }
+        if ($name === 'subtotalArea' || $name === 'mowingWeekArea') {
+            return (is_int($value) || is_float($value))
+                && is_finite((float) $value)
+                && $value >= 0
+                && $value <= self::MAX_AREA_VALUE;
+        }
+
+        return is_int($value) || is_float($value);
     }
 
     private static function result(

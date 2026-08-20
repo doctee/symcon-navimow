@@ -3684,6 +3684,14 @@ class NavimowAccount extends IPSModule
         if (!$this->ReadPropertyBoolean('EnableMqttShadow')) {
             $this->SetTimerInterval('MqttPilotDeadline', 0);
             $this->SetTimerInterval('MqttPilotClosure', 0);
+            if ($state === 'Active') {
+                $this->requestMqttPilotClosure(
+                    'operator-disabled',
+                    $this->currentTimestamp()
+                );
+                $this->scheduleMqttPilotClosureProcessing();
+                return true;
+            }
             if (
                 in_array(
                     $state,
@@ -3796,6 +3804,7 @@ class NavimowAccount extends IPSModule
             'reconnect-exhausted',
             'terminal-authentication',
             'terminal-configuration',
+            'operator-disabled',
         ];
         if (!in_array($reason, $allowedReasons, true)) {
             throw new InvalidArgumentException(
@@ -3805,6 +3814,7 @@ class NavimowAccount extends IPSModule
         $registry = $this->mqttPilotRegistry();
         if (
             ($registry['active'] ?? false) !== true
+            && ($registry['closureState'] ?? null) !== 'Active'
             && !$this->mqttPilotClosureIsPending($registry)
         ) {
             return;
@@ -5996,6 +6006,10 @@ class NavimowAccount extends IPSModule
         $positionAccepted = false;
         $reconciliation = false;
         foreach ($payload['patches'] as $patch) {
+            $patch = $this->protectMqttTaskIdentifiers(
+                $patch,
+                $deviceKey
+            );
             $reduced = Navimow\MqttPartialStateAccumulator::reduce(
                 $state,
                 $patch,
@@ -6049,6 +6063,42 @@ class NavimowAccount extends IPSModule
         return ($accepted || $positionAccepted)
             ? 'accepted'
             : 'reconciliation-queued';
+    }
+
+    private function protectMqttTaskIdentifiers(
+        array $patch,
+        string $deviceKey
+    ): array {
+        $identity = $patch['areaIdentity'] ?? null;
+        unset($patch['areaIdentity']);
+        if (!is_array($identity)) {
+            return $patch;
+        }
+
+        $fields = is_array($patch['fields'] ?? null)
+            ? $patch['fields']
+            : [];
+        $boundaryId = $identity['boundaryId'] ?? null;
+        if (is_int($boundaryId)) {
+            $fields['boundaryKey'] = hash(
+                'sha256',
+                $deviceKey . "\0boundary\0" . (string) $boundaryId
+            );
+        }
+        $partitionIds = $identity['partitionIds'] ?? null;
+        if (is_array($partitionIds)) {
+            $fields['partitionCount'] = count($partitionIds);
+            $fields['partitionKey'] = hash(
+                'sha256',
+                $deviceKey . "\0partitions\0" . json_encode(
+                    $partitionIds,
+                    JSON_THROW_ON_ERROR
+                )
+            );
+        }
+        $patch['fields'] = $fields;
+
+        return $patch;
     }
 
     private function reduceMqttPositionDiagnostic(
@@ -6547,6 +6597,7 @@ class NavimowAccount extends IPSModule
                 'reconnect-exhausted',
                 'terminal-authentication',
                 'terminal-configuration',
+                'operator-disabled',
             ],
             true
         ) ? $value : '';
@@ -6687,6 +6738,56 @@ class NavimowAccount extends IPSModule
                         0,
                         self::MQTT_MAX_DIAGNOSTIC_COUNTER
                     ),
+                'action' => $this->mqttDiagnosticRangedInteger(
+                    $fields['action'] ?? null,
+                    -1,
+                    self::MQTT_MAX_DIAGNOSTIC_COUNTER
+                ),
+                'subAction' => $this->mqttDiagnosticRangedInteger(
+                    $fields['subAction'] ?? null,
+                    -1,
+                    self::MQTT_MAX_DIAGNOSTIC_COUNTER
+                ),
+                'mowStartType' => $this->mqttDiagnosticRangedInteger(
+                    $fields['mowStartType'] ?? null,
+                    0,
+                    self::MQTT_MAX_DIAGNOSTIC_COUNTER
+                ),
+                'currentMowProgress' =>
+                    $this->mqttDiagnosticRangedInteger(
+                        $fields['currentMowProgress'] ?? null,
+                        0,
+                        10000
+                    ),
+                'subtotalArea' => $this->mqttDiagnosticArea(
+                    $fields['subtotalArea'] ?? null
+                ),
+                'mowingWeekArea' => $this->mqttDiagnosticArea(
+                    $fields['mowingWeekArea'] ?? null
+                ),
+                'taskDelay' => is_bool($fields['taskDelay'] ?? null)
+                    ? $fields['taskDelay']
+                    : null,
+                'taskTelemetryReceivedAt' =>
+                    $this->mqttDiagnosticPositiveInteger(
+                        $fields['taskTelemetryReceivedAt'] ?? null
+                    ),
+                'taskTelemetryAgeSeconds' =>
+                    $this->mqttDiagnosticAgeSeconds(
+                        $fields['taskTelemetryReceivedAt'] ?? null
+                    ),
+                'boundaryKey' => $this->mqttDiagnosticHash(
+                    $fields['boundaryKey'] ?? null
+                ),
+                'partitionKey' => $this->mqttDiagnosticHash(
+                    $fields['partitionKey'] ?? null
+                ),
+                'partitionCount' =>
+                    $this->mqttDiagnosticRangedInteger(
+                        $fields['partitionCount'] ?? null,
+                        0,
+                        64
+                    ),
             ],
         ];
     }
@@ -6706,8 +6807,50 @@ class NavimowAccount extends IPSModule
                 'mowingPercentage' => null,
                 'locationType' => null,
                 'locationVehicleStateCode' => null,
+                'action' => null,
+                'subAction' => null,
+                'mowStartType' => null,
+                'currentMowProgress' => null,
+                'subtotalArea' => null,
+                'mowingWeekArea' => null,
+                'taskDelay' => null,
+                'taskTelemetryReceivedAt' => null,
+                'taskTelemetryAgeSeconds' => null,
+                'boundaryKey' => null,
+                'partitionKey' => null,
+                'partitionCount' => null,
             ],
         ];
+    }
+
+    private function mqttDiagnosticHash(mixed $value): ?string
+    {
+        return is_string($value)
+            && preg_match('/^[a-f0-9]{64}$/D', $value) === 1
+                ? $value
+                : null;
+    }
+
+    private function mqttDiagnosticArea(mixed $value): int|float|null
+    {
+        return (is_int($value) || is_float($value))
+            && is_finite((float) $value)
+            && $value >= 0
+            && $value <= 1000000000
+                ? $value
+                : null;
+    }
+
+    private function mqttDiagnosticPositiveInteger(mixed $value): ?int
+    {
+        return is_int($value) && $value > 0 ? $value : null;
+    }
+
+    private function mqttDiagnosticAgeSeconds(mixed $timestamp): ?int
+    {
+        return is_int($timestamp) && $timestamp > 0
+            ? max(0, $this->currentTimestamp() - $timestamp)
+            : null;
     }
 
     private function mqttDiagnosticRangedInteger(
