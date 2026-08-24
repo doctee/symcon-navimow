@@ -27,13 +27,16 @@ Implemented:
 - long-running read-only Dock verification;
 - restart-safe Dock verification without command replay;
 - bounded token-refresh transport recovery.
+- optional, disabled-by-default receive-only MQTT shadow transport;
+- bounded position diagnostics using local-map coordinates;
+- a privacy-safe retained task observation ledger for inferred zone passes.
 
 Not implemented:
 
 - Start;
 - Stop;
-- MQTT/WSS realtime updates;
-- location or map data;
+- public MQTT-driven variables or MQTT device commands;
+- a user-facing map or area-statistics model;
 - Symcon Store packaging.
 
 ## Installation
@@ -164,13 +167,15 @@ Those failure paths are covered by deterministic no-network tests.
 ## Known Limitations
 
 - The module uses an undocumented Navimow cloud API.
+- MQTT is receive-only, diagnostic and non-authoritative; REST remains the
+  source of public mower state.
 - Status is REST-polled and may lag behind the official app.
 - Optional external wake hints are installation-specific and not distributed.
 - Only one mower has direct live transition evidence in this case study.
 - The repeated-operation evidence set is intentionally limited.
 - OAuth client configuration remains installation-specific.
 - Start and Stop remain deliberately disabled.
-- MQTT/WSS realtime data is reserved for a later phase.
+- Area correlations are hashed diagnostic handles and are not app zone names.
 - The module is not approved for broad public release or the Symcon Store.
 
 ## Privacy
