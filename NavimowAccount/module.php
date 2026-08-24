@@ -11,6 +11,7 @@ require_once __DIR__ . '/../libs/Navimow/MqttPartialStateAccumulator.php';
 require_once __DIR__ . '/../libs/Navimow/MqttPayloadException.php';
 require_once __DIR__ . '/../libs/Navimow/MqttPayloadParser.php';
 require_once __DIR__ . '/../libs/Navimow/MqttPositionDiagnostic.php';
+require_once __DIR__ . '/../libs/Navimow/MqttTaskObservationLedger.php';
 require_once __DIR__ . '/../libs/Navimow/MqttTransportConfiguration.php';
 require_once __DIR__ . '/../libs/Navimow/OAuthHelper.php';
 require_once __DIR__ . '/../libs/Navimow/PayloadMapper.php';
@@ -138,6 +139,7 @@ class NavimowAccount extends IPSModule
         $this->RegisterAttributeString('MqttErrorHistory', '[]');
         $this->RegisterAttributeString('MqttShadowState', '{}');
         $this->RegisterAttributeString('MqttPositionDiagnostic', '{}');
+        $this->RegisterAttributeString('MqttTaskObservationLedger', '{}');
         $this->RegisterAttributeString('MqttPendingReconciliation', '{}');
         $this->RegisterAttributeString(
             'MqttPilotObservationRegistry',
@@ -892,6 +894,30 @@ class NavimowAccount extends IPSModule
                 'status' => 'invalid',
                 'trackedDeviceCount' => 0,
                 'observation' => null,
+            ]);
+        }
+    }
+
+    public function GetMqttTaskObservationDiagnostics(): string
+    {
+        try {
+            $ledger = Navimow\MqttTaskObservationLedger::restore(
+                $this->ReadAttributeString('MqttTaskObservationLedger')
+            );
+
+            return $this->encodeResult(
+                Navimow\MqttTaskObservationLedger::project($ledger)
+            );
+        } catch (Throwable) {
+            return $this->encodeResult([
+                'formatVersion' => 1,
+                'authority' => 'mqtt-inference',
+                'semanticUnit' => 'correlated-zone-pass',
+                'status' => 'invalid',
+                'retainedPassCount' => 0,
+                'retainedTransitionCount' => 0,
+                'passes' => [],
+                'transitions' => [],
             ]);
         }
     }
@@ -6018,6 +6044,16 @@ class NavimowAccount extends IPSModule
             $state = $reduced['state'];
             $accepted = $accepted || $reduced['accepted'];
             if (
+                $reduced['accepted']
+                && isset($patch['fields']['taskTelemetryReceivedAt'])
+            ) {
+                $this->reduceMqttTaskObservationLedger(
+                    $state['fields'],
+                    $deviceKey,
+                    $receivedAt
+                );
+            }
+            if (
                 $this->ReadPropertyBoolean(
                     'EnableMqttPositionDiagnostics'
                 )
@@ -6063,6 +6099,40 @@ class NavimowAccount extends IPSModule
         return ($accepted || $positionAccepted)
             ? 'accepted'
             : 'reconciliation-queued';
+    }
+
+    private function reduceMqttTaskObservationLedger(
+        array $fields,
+        string $deviceKey,
+        int $receivedAt
+    ): void {
+        $encoded = $this->ReadAttributeString(
+            'MqttTaskObservationLedger'
+        );
+        try {
+            $ledger = Navimow\MqttTaskObservationLedger::restore($encoded);
+        } catch (Throwable) {
+            $ledger = Navimow\MqttTaskObservationLedger::initialLedger();
+        }
+        $pilot = $this->decodeMqttAttribute(
+            'MqttPilotObservationRegistry',
+            []
+        );
+        $sessionSequence = is_int($pilot['sessionSequence'] ?? null)
+            && $pilot['sessionSequence'] >= 0
+                ? $pilot['sessionSequence']
+                : 0;
+        $ledger = Navimow\MqttTaskObservationLedger::reduce(
+            $ledger,
+            $fields,
+            $deviceKey,
+            $receivedAt,
+            $sessionSequence
+        );
+        $this->WriteAttributeString(
+            'MqttTaskObservationLedger',
+            Navimow\MqttTaskObservationLedger::serializeLedger($ledger)
+        );
     }
 
     private function protectMqttTaskIdentifiers(
