@@ -56,6 +56,7 @@ class NavimowAccount extends IPSModule
     private const MQTT_MAX_DIAGNOSTIC_COUNTER = 2147483647;
     private const MQTT_DIAGNOSTIC_ATTRIBUTE_MAX_BYTES = 262144;
     private const MQTT_PILOT_CHECKPOINT_SECONDS = 18000;
+    private const MQTT_PILOT_MIN_DURATION_SECONDS = 300;
     private const MQTT_PILOT_MAX_DURATION_SECONDS = 259200;
     private const MQTT_PILOT_MAX_RECOVERABLE_INCIDENTS = 1;
     private const MQTT_PILOT_MAX_INCIDENT_EPISODES = 3;
@@ -118,6 +119,10 @@ class NavimowAccount extends IPSModule
         $this->RegisterPropertyInteger('ActivePollInterval', 60);
         $this->RegisterPropertyBoolean('DebugPayloads', false);
         $this->RegisterPropertyBoolean('EnableMqttShadow', false);
+        $this->RegisterPropertyInteger(
+            'MqttPilotMaximumDurationSeconds',
+            self::MQTT_PILOT_MAX_DURATION_SECONDS
+        );
         $this->RegisterPropertyBoolean(
             'EnableMqttPositionDiagnostics',
             false
@@ -4650,6 +4655,50 @@ class NavimowAccount extends IPSModule
         return $nearest;
     }
 
+    private function mqttPilotMaximumDurationSeconds(): int
+    {
+        return max(
+            self::MQTT_PILOT_MIN_DURATION_SECONDS,
+            min(
+                self::MQTT_PILOT_MAX_DURATION_SECONDS,
+                $this->ReadPropertyInteger(
+                    'MqttPilotMaximumDurationSeconds'
+                )
+            )
+        );
+    }
+
+    private function mqttPilotSessionMaximumDurationSeconds(
+        array $registry
+    ): int {
+        $stored = $this->mqttDiagnosticInteger(
+            $registry['maximumDurationSeconds'] ?? null
+        );
+        if (
+            $stored >= self::MQTT_PILOT_MIN_DURATION_SECONDS
+            && $stored <= self::MQTT_PILOT_MAX_DURATION_SECONDS
+        ) {
+            return $stored;
+        }
+
+        $startedAt = $this->mqttDiagnosticInteger(
+            $registry['startedAt'] ?? null
+        );
+        $hardStopAt = $this->mqttDiagnosticInteger(
+            $registry['hardStopAt'] ?? null
+        );
+        $derived = $hardStopAt - $startedAt;
+        if (
+            $startedAt > 0
+            && $derived >= self::MQTT_PILOT_MIN_DURATION_SECONDS
+            && $derived <= self::MQTT_PILOT_MAX_DURATION_SECONDS
+        ) {
+            return $derived;
+        }
+
+        return 0;
+    }
+
     private function startMqttPilotObservationIfNeeded(): void
     {
         $registry = $this->mqttPilotRegistry();
@@ -4665,8 +4714,10 @@ class NavimowAccount extends IPSModule
             $registry['sessionSequence'] ?? null
         );
         $registry['startedAt'] = $now;
+        $registry['maximumDurationSeconds'] =
+            $this->mqttPilotMaximumDurationSeconds();
         $registry['hardStopAt'] =
-            $now + self::MQTT_PILOT_MAX_DURATION_SECONDS;
+            $now + $registry['maximumDurationSeconds'];
         $registry['sessionEpisodeBaseline'] =
             $this->mqttDiagnosticInteger(
                 $registry['episodeSequence'] ?? null
@@ -5100,6 +5151,8 @@ class NavimowAccount extends IPSModule
             'hardStopAt' => $this->mqttDiagnosticInteger(
                 $registry['hardStopAt'] ?? null
             ),
+            'maximumDurationSeconds' =>
+                $this->mqttPilotSessionMaximumDurationSeconds($registry),
             'sessionEpisodeBaseline' => $this->mqttDiagnosticInteger(
                 $registry['sessionEpisodeBaseline'] ?? null
             ),
@@ -5327,6 +5380,10 @@ class NavimowAccount extends IPSModule
             'hardStopAt' => $this->mqttDiagnosticInteger(
                 $registry['hardStopAt'] ?? null
             ),
+            'configuredMaximumDurationSeconds' =>
+                $this->mqttPilotMaximumDurationSeconds(),
+            'sessionMaximumDurationSeconds' =>
+                $this->mqttPilotSessionMaximumDurationSeconds($registry),
             'sessionEpisodeBaseline' => $this->mqttDiagnosticInteger(
                 $registry['sessionEpisodeBaseline'] ?? null
             ),
@@ -5465,6 +5522,10 @@ class NavimowAccount extends IPSModule
             'hardStopAt' => $this->mqttDiagnosticInteger(
                 $registry['hardStopAt'] ?? null
             ),
+            'configuredMaximumDurationSeconds' =>
+                $this->mqttPilotMaximumDurationSeconds(),
+            'sessionMaximumDurationSeconds' =>
+                $this->mqttPilotSessionMaximumDurationSeconds($registry),
             'closureState' => $this->mqttPilotClosureState(
                 $registry['closureState'] ?? null
             ),
