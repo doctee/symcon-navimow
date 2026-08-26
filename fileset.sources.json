@@ -7,8 +7,8 @@
         {
             "source": "case-studies/navimow/distribution/NavimowAccount/form.json",
             "target": "NavimowAccount/form.json",
-            "sha256": "757841b3905bf9a854f859abd6a7cc877dbba7669026bf9bb48d4a7471b9698e",
-            "bytes": 3913
+            "sha256": "38d08c623b1e680ee7e11572d5eab868ecaec7f075034c9d8bcdc0f948050cd0",
+            "bytes": 4110
         },
         {
             "source": "case-studies/navimow/distribution/NavimowAccount/locale.json",
@@ -25,8 +25,8 @@
         {
             "source": "case-studies/navimow/distribution/NavimowAccount/module.php",
             "target": "NavimowAccount/module.php",
-            "sha256": "9f738e25322ae3ef4ebd0db30b69452d063a3679eff6adfddb1a4ed8fea54213",
-            "bytes": 253177
+            "sha256": "592f94a2ddee2d11e218286e7be7bb630e75f4f2eb3d224c0e72c83b134e473d",
+            "bytes": 255315
         },
         {
             "source": "case-studies/navimow/distribution/NavimowConfigurator/form.json",
@@ -191,7 +191,7 @@
             "bytes": 1962
         }
     ],
-    "filesetSha256": "785c7b365b1818ab4e1af7a13c1518d88e233074ca87f523bfb35246155cafba",
+    "filesetSha256": "b07c068dc510857744e536a8eec19b9d767585dcadccccaba606af4f8d20cdbb",
     "builderVersion": "1.0.0",
     "license": {
         "identifier": "PolyForm-Noncommercial-1.0.0",

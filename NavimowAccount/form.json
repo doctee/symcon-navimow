@@ -43,6 +43,13 @@
       "caption": "Enable experimental MQTT shadow"
     },
     {
+      "type": "NumberSpinner",
+      "name": "MqttPilotMaximumDurationSeconds",
+      "caption": "MQTT pilot maximum duration (seconds)",
+      "minimum": 300,
+      "maximum": 259200
+    },
+    {
       "type": "CheckBox",
       "name": "EnableMqttPositionDiagnostics",
       "caption": "Enable MQTT position diagnostics"
