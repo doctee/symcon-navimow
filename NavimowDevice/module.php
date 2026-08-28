@@ -20,6 +20,7 @@ require_once __DIR__ . '/../libs/Navimow/LocalMapSvgRenderer.php';
 
 class NavimowDevice extends IPSModule
 {
+    private const INSTANCE_STATUS_ACTIVE = 102;
     private const DATA_INTERFACE = '{54620029-127D-470D-97C7-44265496FAA0}';
     private const MESSAGE_SCHEMA_VERSION = 1;
     private const VEHICLE_STATE_DOCKED = 2;
@@ -141,6 +142,8 @@ class NavimowDevice extends IPSModule
             $this->SetValue('LocalMap', '');
             $this->setLocalMapHidden(true);
         }
+
+        $this->SetStatus(self::INSTANCE_STATUS_ACTIVE);
     }
 
     public function RefreshStatus(): string
