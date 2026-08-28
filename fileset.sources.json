@@ -73,8 +73,8 @@
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/module.php",
             "target": "NavimowDevice/module.php",
-            "sha256": "76b43d6bad90c5467db60f5bc2790e3cb55834902d8ef662e9a70e71a87002d8",
-            "bytes": 57087
+            "sha256": "68dc1859fd8b0255f9ff5b116e26972ef2b7f0c8a4b6c72b697d39f760428496",
+            "bytes": 57192
         },
         {
             "source": "case-studies/navimow/distribution/NavimowMqttReceiver/form.json",
@@ -233,7 +233,7 @@
             "bytes": 3780
         }
     ],
-    "filesetSha256": "4c0d7ac0b1a7834c2ee33f2554f5eb643d92fc9ab72056a1cc0a9f42399102e3",
+    "filesetSha256": "e711fa5220d81a915478c38833184e943cd6e5fd8afa7e71d08c6d0d52f23d4c",
     "builderVersion": "1.0.0",
     "license": {
         "identifier": "PolyForm-Noncommercial-1.0.0",
