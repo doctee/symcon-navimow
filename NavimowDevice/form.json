@@ -21,6 +21,11 @@
       "caption": "Enable local map"
     },
     {
+      "type": "CheckBox",
+      "name": "EnableZoneStatistics",
+      "caption": "Expose revision-bound zone statistics"
+    },
+    {
       "type": "ValidationTextBox",
       "name": "AcceptedGeometryKey",
       "caption": "Accepted map revision"
