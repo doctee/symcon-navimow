@@ -14,6 +14,64 @@
       "type": "CheckBox",
       "name": "DebugPayloads",
       "caption": "Enable debug payload variable"
+    },
+    {
+      "type": "CheckBox",
+      "name": "EnableLocalMap",
+      "caption": "Enable local map"
+    },
+    {
+      "type": "ValidationTextBox",
+      "name": "AcceptedGeometryKey",
+      "caption": "Accepted map revision"
+    },
+    {
+      "type": "ValidationTextBox",
+      "name": "AcceptedMapProjection",
+      "caption": "Accepted private map package"
+    },
+    {
+      "type": "ValidationTextBox",
+      "name": "HiddenZoneSequences",
+      "caption": "Hidden zone label sequences"
+    },
+    {
+      "type": "Select",
+      "name": "MapTheme",
+      "caption": "Map color theme",
+      "options": [
+        {
+          "caption": "Dark",
+          "value": "dark"
+        },
+        {
+          "caption": "Light",
+          "value": "light"
+        }
+      ]
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "TrackRetentionHours",
+      "caption": "Track retention hours",
+      "minimum": 1,
+      "maximum": 720
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "MapRefreshInterval",
+      "caption": "Active map refresh interval",
+      "suffix": " seconds",
+      "minimum": 15,
+      "maximum": 900
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "MapIdleRefreshInterval",
+      "caption": "Idle map refresh interval",
+      "suffix": " seconds",
+      "minimum": 60,
+      "maximum": 3600
     }
   ],
   "actions": [
@@ -21,6 +79,11 @@
       "type": "Button",
       "caption": "Refresh Status",
       "onClick": "echo NAVDV_RefreshStatus($id);"
+    },
+    {
+      "type": "Button",
+      "caption": "Refresh Local Map",
+      "onClick": "echo NAVDV_RefreshLocalMap($id);"
     },
     {
       "type": "Button",

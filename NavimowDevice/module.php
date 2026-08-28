@@ -3,6 +3,20 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../libs/Navimow/Profiles.php';
+$configurationHashHelper = __DIR__
+    . '/../libs/SAEF/helpers/diagnostics/ConfigurationHash.php';
+if (
+    !function_exists('SAEF_CreateConfigurationHash')
+    && is_file($configurationHashHelper)
+) {
+    require_once $configurationHashHelper;
+}
+unset($configurationHashHelper);
+require_once __DIR__ . '/../libs/Navimow/MqttPathSegmenter.php';
+require_once __DIR__ . '/../libs/Navimow/ZoneStatisticsReducer.php';
+require_once __DIR__ . '/../libs/Navimow/LocalMapSceneProjector.php';
+require_once __DIR__ . '/../libs/Navimow/RevisionBoundedTrackStore.php';
+require_once __DIR__ . '/../libs/Navimow/LocalMapSvgRenderer.php';
 
 class NavimowDevice extends IPSModule
 {
@@ -37,6 +51,11 @@ class NavimowDevice extends IPSModule
     private const COMMAND_STATE_TIMED_OUT = 5;
     private const COMMAND_STATE_FAILED = 6;
     private const COMMAND_STATE_WAITING_READ = 7;
+    private const LOCAL_MAP_MAX_PACKAGE_BYTES = 1024 * 1024;
+    private const LOCAL_MAP_MAX_EVIDENCE_BYTES = 256 * 1024;
+    private const LOCAL_MAP_MAX_ERROR_ENTRIES = 20;
+    private const LOCAL_MAP_REST_STALE_SECONDS = 300;
+    private const LOCAL_MAP_SEMAPHORE_TIMEOUT_MILLISECONDS = 1000;
 
     public function Create()
     {
@@ -45,6 +64,14 @@ class NavimowDevice extends IPSModule
         $this->RegisterPropertyString('DeviceId', '');
         $this->RegisterPropertyString('DisplayName', '');
         $this->RegisterPropertyBoolean('DebugPayloads', false);
+        $this->RegisterPropertyBoolean('EnableLocalMap', false);
+        $this->RegisterPropertyString('AcceptedMapProjection', '');
+        $this->RegisterPropertyString('AcceptedGeometryKey', '');
+        $this->RegisterPropertyString('HiddenZoneSequences', '[1]');
+        $this->RegisterPropertyString('MapTheme', 'dark');
+        $this->RegisterPropertyInteger('TrackRetentionHours', 72);
+        $this->RegisterPropertyInteger('MapRefreshInterval', 60);
+        $this->RegisterPropertyInteger('MapIdleRefreshInterval', 300);
 
         $this->RegisterAttributeBoolean('CommandActive', false);
         $this->RegisterAttributeInteger('CommandCloudResult', 0);
@@ -53,12 +80,23 @@ class NavimowDevice extends IPSModule
         $this->RegisterAttributeInteger('CommandDeadline', 0);
         $this->RegisterAttributeInteger('CommandVerificationState', self::COMMAND_STATE_IDLE);
         $this->RegisterAttributeInteger('CommandKind', 0);
+        $this->RegisterAttributeString('LocalMapRevisionRegistry', '{}');
+        $this->RegisterAttributeString('LocalMapTrackState', '{}');
+        $this->RegisterAttributeString('LocalMapStatisticsState', '{}');
+        $this->RegisterAttributeString('LocalMapRenderMetadata', '{}');
+        $this->RegisterAttributeString('LocalMapErrorHistory', '[]');
 
         $this->RegisterTimer(
             'CommandVerification',
             0,
             'NAVDV_VerifyCommand($_IPS["TARGET"]);'
         );
+        $this->RegisterTimer(
+            'LocalMapRefresh',
+            0,
+            'NAVDV_RefreshLocalMap($_IPS["TARGET"]);'
+        );
+        $this->registerKernelStartMessage();
     }
 
     public function ApplyChanges()
@@ -75,6 +113,7 @@ class NavimowDevice extends IPSModule
         $this->RegisterVariableInteger('LastCommandAt', 'Last Command At', '~UnixTimestamp', 60);
         $this->RegisterVariableInteger('LastCommandResult', 'Last Command Result', 'NAVIMOW.CommandResult', 70);
         $this->RegisterVariableString('LastCommandError', 'Last Command Error', '', 80);
+        $this->RegisterVariableString('LocalMap', 'Local Map', '~HTMLBox', 100);
 
         if ($this->ReadPropertyBoolean('DebugPayloads')) {
             $this->RegisterVariableString('RawStatusJson', 'Raw Status JSON', '', 90);
@@ -85,12 +124,224 @@ class NavimowDevice extends IPSModule
         } else {
             $this->SetTimerInterval('CommandVerification', 0);
         }
+
+        if ($this->localMapConfigurationIsValid()) {
+            $this->setLocalMapHidden(false);
+            $this->scheduleLocalMapRefresh();
+        } else {
+            $this->SetTimerInterval('LocalMapRefresh', 0);
+            $this->SetValue('LocalMap', '');
+            $this->setLocalMapHidden(true);
+        }
     }
 
     public function RefreshStatus(): string
     {
         $result = $this->refreshStatusInternal();
         return $result['message'];
+    }
+
+    public function RefreshLocalMap(): string
+    {
+        if (!$this->ReadPropertyBoolean('EnableLocalMap')) {
+            $this->SetTimerInterval('LocalMapRefresh', 0);
+            return 'Local map is disabled.';
+        }
+        if (!$this->localMapConfigurationIsValid()) {
+            $this->SetTimerInterval('LocalMapRefresh', 0);
+            $this->SetValue('LocalMap', '');
+            $this->setLocalMapHidden(true);
+            return 'Local map configuration is invalid.';
+        }
+        $lockName = 'NAVIMOW_LOCAL_MAP_' . $this->InstanceID;
+        if (
+            !IPS_SemaphoreEnter(
+                $lockName,
+                self::LOCAL_MAP_SEMAPHORE_TIMEOUT_MILLISECONDS
+            )
+        ) {
+            return 'Local map refresh is already running.';
+        }
+
+        try {
+            $package = $this->acceptedLocalMapPackage();
+            $geometryKey = SAEF_CreateConfigurationHash(
+                $package['geometry']
+            );
+            if (
+                !hash_equals(
+                    $this->ReadPropertyString('AcceptedGeometryKey'),
+                    $geometryKey
+                )
+            ) {
+                throw new RuntimeException(
+                    'Accepted map revision does not match the projection.'
+                );
+            }
+            $deviceId = trim($this->ReadPropertyString('DeviceId'));
+            if ($deviceId === '') {
+                throw new RuntimeException('Device ID is not configured.');
+            }
+            $response = $this->SendDataToParent(json_encode([
+                'DataID' => self::DATA_INTERFACE,
+                'SchemaVersion' => self::MESSAGE_SCHEMA_VERSION,
+                'Function' => 'GetLocalMapEvidence',
+                'DeviceId' => $deviceId,
+            ], JSON_THROW_ON_ERROR));
+            if (strlen($response) > self::LOCAL_MAP_MAX_EVIDENCE_BYTES) {
+                throw new RuntimeException(
+                    'Local map evidence exceeds the byte limit.'
+                );
+            }
+            $evidence = json_decode(
+                $response,
+                true,
+                64,
+                JSON_THROW_ON_ERROR
+            );
+            if (!is_array($evidence)) {
+                throw new RuntimeException(
+                    'Local map evidence is invalid.'
+                );
+            }
+            $status = $evidence['status'] ?? null;
+            if (!in_array($status, ['ok', 'stale'], true)) {
+                if (
+                    in_array(
+                        $status,
+                        ['disabled', 'inactive', 'unavailable', 'ambiguous'],
+                        true
+                    )
+                ) {
+                    $stored = $this->renderStoredLocalMap(
+                        $package,
+                        $geometryKey
+                    );
+                    $this->SetValue('LocalMap', $stored['svg']);
+                    $this->writeLocalMapMetadata(
+                        $status,
+                        $geometryKey,
+                        $stored['segmentCount'],
+                        $stored['pointCount']
+                    );
+                    $this->scheduleLocalMapRefresh();
+                    return 'Local map rendered without fresh MQTT evidence.';
+                }
+                $this->writeLocalMapMetadata(
+                    is_string($status) ? $status : 'invalid',
+                    $geometryKey,
+                    0,
+                    0
+                );
+                $this->scheduleLocalMapRefresh();
+                return 'Local map evidence is ' . (
+                    is_string($status) ? $status : 'invalid'
+                ) . '.';
+            }
+            $this->assertLocalMapEvidenceAuthority($evidence);
+            $position = $evidence['position'] ?? null;
+            $task = $evidence['task'] ?? null;
+            if (!is_array($position) || !is_array($task)) {
+                throw new RuntimeException(
+                    'Local map evidence projections are missing.'
+                );
+            }
+            $track = $position['track'] ?? null;
+            if (!is_array($track) || !array_is_list($track)) {
+                throw new RuntimeException(
+                    'Local map position track is invalid.'
+                );
+            }
+            $cutoff = $this->currentTimestamp()
+                - $this->trackRetentionHours() * 3600;
+            $track = array_values(array_filter(
+                $track,
+                static fn (mixed $point): bool => is_array($point)
+                    && is_int($point['receivedAt'] ?? null)
+                    && $point['receivedAt'] >= $cutoff
+            ));
+            $passes = $task['passes'] ?? null;
+            if (!is_array($passes) || !array_is_list($passes)) {
+                throw new RuntimeException(
+                    'Local map task passes are invalid.'
+                );
+            }
+            $path = Navimow\MqttPathSegmenter::build($track, $passes);
+            $areas = $this->configuredZoneAreas($package);
+            $statistics = Navimow\ZoneStatisticsReducer::reduce(
+                $task,
+                $areas
+            );
+            $revision = [
+                'currentGeometryKey' => $geometryKey,
+                'acceptedGeometryKey' => $geometryKey,
+                'pathGeometryKey' => $geometryKey,
+                'statisticsGeometryKey' => $geometryKey,
+                'frameCorrelationApproved' => true,
+            ];
+            $scene = Navimow\LocalMapSceneProjector::build(
+                $package['geometry'],
+                $path,
+                $statistics,
+                $package['bindings'],
+                $revision
+            );
+            $trackState = $this->restoreLocalMapTrackState();
+            $trackState = Navimow\RevisionBoundedTrackStore::pruneBefore(
+                $trackState,
+                max(1, $cutoff)
+            );
+            $trackState = Navimow\RevisionBoundedTrackStore::ingestScene(
+                $trackState,
+                $scene
+            );
+            $scene['path'] = Navimow\RevisionBoundedTrackStore::scenePath(
+                $trackState,
+                $geometryKey
+            );
+            $svg = Navimow\LocalMapSvgRenderer::render($scene, [
+                'stationState' => $this->localMapStationState(),
+                'hiddenZoneSequences' => $this->hiddenZoneSequences(),
+                'theme' => $this->localMapTheme(),
+            ]);
+            $trackProjection = Navimow\RevisionBoundedTrackStore::project(
+                $trackState
+            );
+            $this->WriteAttributeString(
+                'LocalMapTrackState',
+                Navimow\RevisionBoundedTrackStore::serializeState(
+                    $trackState
+                )
+            );
+            $this->WriteAttributeString(
+                'LocalMapStatisticsState',
+                json_encode($statistics, JSON_THROW_ON_ERROR)
+            );
+            $this->WriteAttributeString(
+                'LocalMapRevisionRegistry',
+                json_encode([
+                    'formatVersion' => 1,
+                    'acceptedGeometryKey' => $geometryKey,
+                    'lastValidatedAt' => $this->currentTimestamp(),
+                ], JSON_THROW_ON_ERROR)
+            );
+            $this->SetValue('LocalMap', $svg);
+            $this->writeLocalMapMetadata(
+                $status,
+                $geometryKey,
+                $trackProjection['segmentCount'],
+                $trackProjection['pointCount']
+            );
+            $this->scheduleLocalMapRefresh();
+
+            return 'Local map refresh succeeded.';
+        } catch (Throwable $exception) {
+            $this->recordLocalMapError($exception->getMessage());
+            $this->scheduleLocalMapRefresh();
+            return 'Local map refresh failed.';
+        } finally {
+            IPS_SemaphoreLeave($lockName);
+        }
     }
 
     private function refreshStatusInternal(): array
@@ -588,6 +839,461 @@ class NavimowDevice extends IPSModule
                 self::COMMAND_STATE_FAILED
             );
         }
+    }
+
+    public function MessageSink(
+        $TimeStamp,
+        $SenderID,
+        $Message,
+        $Data
+    ) {
+        if (
+            $SenderID === 0
+            && $Message === $this->kernelStartedMessageId()
+        ) {
+            $this->scheduleLocalMapRefresh();
+        }
+    }
+
+    /** @return array<string, mixed> */
+    private function acceptedLocalMapPackage(): array
+    {
+        $encoded = trim($this->ReadPropertyString(
+            'AcceptedMapProjection'
+        ));
+        if (
+            $encoded === ''
+            || strlen($encoded) > self::LOCAL_MAP_MAX_PACKAGE_BYTES
+        ) {
+            throw new RuntimeException(
+                'Accepted map projection is missing or oversized.'
+            );
+        }
+        $package = json_decode(
+            $encoded,
+            true,
+            64,
+            JSON_THROW_ON_ERROR
+        );
+        if (
+            !is_array($package)
+            || ($package['formatVersion'] ?? null) !== 1
+            || !is_array($package['geometry'] ?? null)
+            || !is_array($package['bindings'] ?? null)
+            || !array_is_list($package['bindings'])
+            || ($package['frameCorrelationApproved'] ?? null) !== true
+        ) {
+            throw new RuntimeException(
+                'Accepted map package is invalid.'
+            );
+        }
+        $key = trim($this->ReadPropertyString('AcceptedGeometryKey'));
+        if (preg_match('/^[a-f0-9]{64}$/D', $key) !== 1) {
+            throw new RuntimeException(
+                'Accepted map revision key is invalid.'
+            );
+        }
+
+        return $package;
+    }
+
+    private function localMapConfigurationIsValid(): bool
+    {
+        if (
+            !$this->ReadPropertyBoolean('EnableLocalMap')
+            || trim($this->ReadPropertyString('DeviceId')) === ''
+        ) {
+            return false;
+        }
+        try {
+            $package = $this->acceptedLocalMapPackage();
+            $geometryKey = $this->ReadPropertyString(
+                'AcceptedGeometryKey'
+            );
+            $this->hiddenZoneSequences();
+            $this->localMapTheme();
+            if (
+                !hash_equals(
+                    $geometryKey,
+                    SAEF_CreateConfigurationHash($package['geometry'])
+                )
+            ) {
+                return false;
+            }
+            $this->validateLocalMapPackage($package, $geometryKey);
+
+            return true;
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    /** @param array<string, mixed> $package */
+    private function validateLocalMapPackage(
+        array $package,
+        string $geometryKey
+    ): void {
+        $this->configuredZoneAreas($package);
+        Navimow\LocalMapSceneProjector::build(
+            $package['geometry'],
+            $this->emptyLocalMapPath(),
+            $this->emptyLocalMapStatistics(),
+            $package['bindings'],
+            [
+                'currentGeometryKey' => $geometryKey,
+                'acceptedGeometryKey' => $geometryKey,
+                'pathGeometryKey' => $geometryKey,
+                'statisticsGeometryKey' => $geometryKey,
+                'frameCorrelationApproved' => true,
+            ]
+        );
+    }
+
+    /** @param array<string, mixed> $evidence */
+    private function assertLocalMapEvidenceAuthority(array $evidence): void
+    {
+        $authority = $evidence['authority'] ?? null;
+        if (
+            ($evidence['formatVersion'] ?? null) !== 1
+            || !is_array($authority)
+            || ($authority['state'] ?? null) !== 'rest-authoritative'
+            || ($authority['path'] ?? null) !== 'mqtt-inference'
+            || ($authority['task'] ?? null) !== 'mqtt-inference'
+            || !is_int($evidence['observedAt'] ?? null)
+            || $evidence['observedAt'] <= 0
+        ) {
+            throw new RuntimeException(
+                'Local map evidence authority is invalid.'
+            );
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $package
+     *
+     * @return array<string, float>
+     */
+    private function configuredZoneAreas(array $package): array
+    {
+        $zones = $package['geometry']['zones'] ?? null;
+        if (!is_array($zones) || !array_is_list($zones)) {
+            throw new RuntimeException('Map zones are invalid.');
+        }
+        $areaById = [];
+        foreach ($zones as $zone) {
+            if (
+                !is_array($zone)
+                || !is_int($zone['id'] ?? null)
+            ) {
+                throw new RuntimeException('Map zone identity is invalid.');
+            }
+            $reported = $zone['reportedArea'] ?? null;
+            if (
+                (is_int($reported) || is_float($reported))
+                && is_finite((float) $reported)
+                && (float) $reported > 0.0
+            ) {
+                $areaById[$zone['id']] = (float) $reported;
+            }
+        }
+        $areas = [];
+        foreach ($package['bindings'] as $binding) {
+            if (!is_array($binding)) {
+                throw new RuntimeException('Map binding is invalid.');
+            }
+            $zoneId = $binding['zoneId'] ?? null;
+            $zoneKey = $binding['zoneKey'] ?? null;
+            if ($zoneKey === null) {
+                continue;
+            }
+            if (
+                !is_int($zoneId)
+                || !isset($areaById[$zoneId])
+                || !is_string($zoneKey)
+                || preg_match('/^[a-f0-9]{64}$/D', $zoneKey) !== 1
+            ) {
+                throw new RuntimeException(
+                    'Map zone-area binding is invalid.'
+                );
+            }
+            $areas[$zoneKey] = $areaById[$zoneId];
+        }
+
+        return $areas;
+    }
+
+    /** @return list<int> */
+    private function hiddenZoneSequences(): array
+    {
+        $decoded = json_decode(
+            $this->ReadPropertyString('HiddenZoneSequences'),
+            true,
+            8,
+            JSON_THROW_ON_ERROR
+        );
+        if (
+            !is_array($decoded)
+            || !array_is_list($decoded)
+            || count($decoded) > 32
+        ) {
+            throw new RuntimeException(
+                'Hidden zone sequences are invalid.'
+            );
+        }
+        $result = [];
+        foreach ($decoded as $sequence) {
+            if (!is_int($sequence) || $sequence < 1 || $sequence > 32) {
+                throw new RuntimeException(
+                    'Hidden zone sequence is invalid.'
+                );
+            }
+            $result[$sequence] = $sequence;
+        }
+        ksort($result);
+
+        return array_values($result);
+    }
+
+    private function localMapTheme(): string
+    {
+        $theme = $this->ReadPropertyString('MapTheme');
+        if (!in_array($theme, ['dark', 'light'], true)) {
+            throw new RuntimeException('Local map theme is invalid.');
+        }
+
+        return $theme;
+    }
+
+    /** @return array<string, mixed> */
+    private function restoreLocalMapTrackState(): array
+    {
+        $encoded = $this->ReadAttributeString('LocalMapTrackState');
+        if ($encoded === '' || $encoded === '{}') {
+            return Navimow\RevisionBoundedTrackStore::initialState();
+        }
+
+        return Navimow\RevisionBoundedTrackStore::restoreState($encoded);
+    }
+
+    /** @return array<string, mixed> */
+    private function restoreLocalMapStatistics(): array
+    {
+        $encoded = $this->ReadAttributeString('LocalMapStatisticsState');
+        if ($encoded === '' || $encoded === '{}') {
+            return $this->emptyLocalMapStatistics();
+        }
+        $statistics = json_decode(
+            $encoded,
+            true,
+            32,
+            JSON_THROW_ON_ERROR
+        );
+        if (
+            !is_array($statistics)
+            || ($statistics['formatVersion'] ?? null) !== 1
+            || !is_array($statistics['zones'] ?? null)
+            || !array_is_list($statistics['zones'])
+        ) {
+            throw new RuntimeException(
+                'Stored local-map statistics are invalid.'
+            );
+        }
+
+        return $statistics;
+    }
+
+    /**
+     * @param array<string, mixed> $package
+     *
+     * @return array{svg: string, segmentCount: int, pointCount: int}
+     */
+    private function renderStoredLocalMap(
+        array $package,
+        string $geometryKey
+    ): array {
+        $scene = Navimow\LocalMapSceneProjector::build(
+            $package['geometry'],
+            $this->emptyLocalMapPath(),
+            $this->restoreLocalMapStatistics(),
+            $package['bindings'],
+            [
+                'currentGeometryKey' => $geometryKey,
+                'acceptedGeometryKey' => $geometryKey,
+                'pathGeometryKey' => $geometryKey,
+                'statisticsGeometryKey' => $geometryKey,
+                'frameCorrelationApproved' => true,
+            ]
+        );
+        $state = $this->restoreLocalMapTrackState();
+        $projection = Navimow\RevisionBoundedTrackStore::project($state);
+        $scene['path'] = Navimow\RevisionBoundedTrackStore::scenePath(
+            $state,
+            $geometryKey
+        );
+
+        return [
+            'svg' => Navimow\LocalMapSvgRenderer::render($scene, [
+                'stationState' => $this->localMapStationState(),
+                'hiddenZoneSequences' => $this->hiddenZoneSequences(),
+                'theme' => $this->localMapTheme(),
+            ]),
+            'segmentCount' => $projection['segmentCount'],
+            'pointCount' => $projection['pointCount'],
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function emptyLocalMapPath(): array
+    {
+        return [
+            'formatVersion' => 1,
+            'authority' => 'mqtt-inference',
+            'coordinateFrame' => 'uncalibrated-local',
+            'latest' => null,
+            'segments' => [],
+            'counters' => [],
+            'policy' => [],
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function emptyLocalMapStatistics(): array
+    {
+        return [
+            'formatVersion' => 1,
+            'authority' => 'mqtt-inference',
+            'percentageContract' => [
+                'geometricCoveragePercent' => 'not-implemented',
+            ],
+            'zones' => [],
+        ];
+    }
+
+    private function localMapStationState(): string
+    {
+        $lastUpdate = $this->GetValue('LastStatusUpdate');
+        $online = $this->GetValue('Online');
+        if (
+            $online !== true
+            || !is_int($lastUpdate)
+            || $lastUpdate <= 0
+            || $this->currentTimestamp() - $lastUpdate
+                > self::LOCAL_MAP_REST_STALE_SECONDS
+        ) {
+            return 'unknown';
+        }
+        $state = $this->GetValue('VehicleState');
+        if ($state === self::VEHICLE_STATE_DOCKED) {
+            return 'docked';
+        }
+        if ($state === self::VEHICLE_STATE_DOCKING) {
+            return 'docking';
+        }
+        if (is_int($state) && $state >= 1 && $state <= 10) {
+            return 'undocked';
+        }
+
+        return 'unknown';
+    }
+
+    private function trackRetentionHours(): int
+    {
+        return max(1, min(
+            720,
+            $this->ReadPropertyInteger('TrackRetentionHours')
+        ));
+    }
+
+    private function scheduleLocalMapRefresh(): void
+    {
+        if (!$this->localMapConfigurationIsValid()) {
+            $this->SetTimerInterval('LocalMapRefresh', 0);
+            return;
+        }
+        $active = $this->localMapStationState() !== 'docked'
+            && $this->localMapStationState() !== 'unknown';
+        $seconds = $active
+            ? max(15, min(
+                900,
+                $this->ReadPropertyInteger('MapRefreshInterval')
+            ))
+            : max(60, min(
+                3600,
+                $this->ReadPropertyInteger('MapIdleRefreshInterval')
+            ));
+        $this->SetTimerInterval('LocalMapRefresh', $seconds * 1000);
+    }
+
+    private function writeLocalMapMetadata(
+        string $status,
+        string $geometryKey,
+        int $segmentCount,
+        int $pointCount
+    ): void {
+        $this->WriteAttributeString(
+            'LocalMapRenderMetadata',
+            json_encode([
+                'formatVersion' => 1,
+                'status' => substr($status, 0, 32),
+                'geometryKey' => $geometryKey,
+                'lastAttemptAt' => $this->currentTimestamp(),
+                'segmentCount' => max(0, $segmentCount),
+                'pointCount' => max(0, $pointCount),
+            ], JSON_THROW_ON_ERROR)
+        );
+    }
+
+    private function recordLocalMapError(string $message): void
+    {
+        $encoded = $this->ReadAttributeString('LocalMapErrorHistory');
+        $history = json_decode($encoded, true, 16);
+        if (!is_array($history) || !array_is_list($history)) {
+            $history = [];
+        }
+        $history[] = [
+            'timestamp' => $this->currentTimestamp(),
+            'message' => $this->limitMessage($message),
+            'context' => ['operation' => 'local-map-refresh'],
+        ];
+        $this->WriteAttributeString(
+            'LocalMapErrorHistory',
+            json_encode(
+                array_slice(
+                    $history,
+                    -self::LOCAL_MAP_MAX_ERROR_ENTRIES
+                ),
+                JSON_THROW_ON_ERROR
+            )
+        );
+    }
+
+    private function setLocalMapHidden(bool $hidden): void
+    {
+        try {
+            $id = $this->GetIDForIdent('LocalMap');
+            if ($id > 0 && function_exists('IPS_SetHidden')) {
+                IPS_SetHidden($id, $hidden);
+            }
+        } catch (Throwable) {
+        }
+    }
+
+    private function registerKernelStartMessage(): void
+    {
+        $registerMessage = [$this, 'Register' . 'Message'];
+        if (is_callable($registerMessage)) {
+            $registerMessage(0, $this->kernelStartedMessageId());
+        }
+    }
+
+    private function kernelStartedMessageId(): int
+    {
+        if (!defined('IPS_KERNELSTARTED')) {
+            return 10001;
+        }
+        $messageId = constant('IPS_KERNELSTARTED');
+
+        return is_int($messageId) ? $messageId : 10001;
     }
 
     protected function currentTimestamp(): int

@@ -55,6 +55,8 @@ class NavimowAccount extends IPSModule
     private const MQTT_RECONNECT_DELAYS_SECONDS = [60, 300, 900];
     private const MQTT_MAX_DIAGNOSTIC_COUNTER = 2147483647;
     private const MQTT_DIAGNOSTIC_ATTRIBUTE_MAX_BYTES = 262144;
+    private const LOCAL_MAP_EVIDENCE_MAX_BYTES = 262144;
+    private const LOCAL_MAP_POSITION_STALE_SECONDS = 300;
     private const MQTT_PILOT_CHECKPOINT_SECONDS = 18000;
     private const MQTT_PILOT_MIN_DURATION_SECONDS = 300;
     private const MQTT_PILOT_MAX_DURATION_SECONDS = 259200;
@@ -500,6 +502,15 @@ class NavimowAccount extends IPSModule
                 return $this->encodeResult($this->performStatus($deviceId));
             }
 
+            if ($function === 'GetLocalMapEvidence') {
+                $deviceId = $this->validateDeviceId(
+                    $message['DeviceId'] ?? null
+                );
+                return $this->encodeResult(
+                    $this->localMapEvidence($deviceId)
+                );
+            }
+
             if ($function === 'SendCommand') {
                 $deviceId = $this->validateDeviceId($message['DeviceId'] ?? null);
                 $command = $message['Command'] ?? null;
@@ -924,6 +935,113 @@ class NavimowAccount extends IPSModule
                 'passes' => [],
                 'transitions' => [],
             ]);
+        }
+    }
+
+    /** @return array<string, mixed> */
+    private function localMapEvidence(string $deviceId): array
+    {
+        $base = [
+            'formatVersion' => 1,
+            'authority' => [
+                'state' => 'rest-authoritative',
+                'path' => 'mqtt-inference',
+                'task' => 'mqtt-inference',
+            ],
+            'observedAt' => $this->currentTimestamp(),
+            'position' => null,
+            'task' => null,
+        ];
+        if (!$this->ReadPropertyBoolean('EnableMqttPositionDiagnostics')) {
+            return $base + ['status' => 'disabled'];
+        }
+        if (!$this->ReadPropertyBoolean('EnableMqttShadow')) {
+            return $base + ['status' => 'inactive'];
+        }
+
+        try {
+            $encoded = $this->ReadAttributeString(
+                'MqttPositionDiagnostic'
+            );
+            if (
+                strlen($encoded)
+                    > self::MQTT_DIAGNOSTIC_ATTRIBUTE_MAX_BYTES
+            ) {
+                throw new Navimow\MqttPayloadException(
+                    'MQTT position diagnostic root exceeds the limit.'
+                );
+            }
+            $root = json_decode(
+                $encoded,
+                true,
+                32,
+                JSON_THROW_ON_ERROR
+            );
+            if (
+                !is_array($root)
+                || ($root['formatVersion'] ?? null) !== 1
+                || !array_key_exists('deviceKey', $root)
+                || !is_int($root['conflictingDeviceCount'] ?? null)
+                || $root['conflictingDeviceCount'] < 0
+                || !is_array($root['state'] ?? null)
+            ) {
+                throw new Navimow\MqttPayloadException(
+                    'MQTT position diagnostic root is malformed.'
+                );
+            }
+            if ($root['conflictingDeviceCount'] > 0) {
+                return $base + ['status' => 'ambiguous'];
+            }
+            $retainedDeviceKey = $root['deviceKey'];
+            if ($retainedDeviceKey === null) {
+                return $base + ['status' => 'unavailable'];
+            }
+            if (
+                !is_string($retainedDeviceKey)
+                || preg_match(
+                    '/^[a-f0-9]{64}$/D',
+                    $retainedDeviceKey
+                ) !== 1
+                || !hash_equals(
+                    hash('sha256', $deviceId),
+                    $retainedDeviceKey
+                )
+            ) {
+                return $base + ['status' => 'unavailable'];
+            }
+
+            $position = Navimow\MqttPositionDiagnostic::project(
+                $root['state'],
+                $this->currentTimestamp()
+            );
+            if (($position['availability'] ?? null) !== 'available') {
+                return $base + ['status' => 'unavailable'];
+            }
+            $ledger = Navimow\MqttTaskObservationLedger::restore(
+                $this->ReadAttributeString(
+                    'MqttTaskObservationLedger'
+                )
+            );
+            $task = Navimow\MqttTaskObservationLedger::project($ledger);
+            $age = $position['latest']['ageSeconds'] ?? null;
+            $result = array_replace($base, [
+                'status' => is_int($age)
+                    && $age <= self::LOCAL_MAP_POSITION_STALE_SECONDS
+                        ? 'ok'
+                        : 'stale',
+                'position' => $position,
+                'task' => $task,
+            ]);
+            if (
+                strlen($this->encodeResult($result))
+                    > self::LOCAL_MAP_EVIDENCE_MAX_BYTES
+            ) {
+                return $base + ['status' => 'error'];
+            }
+
+            return $result;
+        } catch (Throwable) {
+            return $base + ['status' => 'error'];
         }
     }
 
