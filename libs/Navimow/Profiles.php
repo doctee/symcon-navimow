@@ -59,6 +59,24 @@ final class Profiles
             7 => 'Failed',
             8 => 'Verification Timeout',
         ]);
+
+        self::ensureIntegerProfile('NAVIMOW.StatisticsState', [
+            0 => 'Disabled',
+            1 => 'No Data',
+            2 => 'Available',
+            3 => 'Stale',
+            4 => 'Invalid',
+        ]);
+
+        self::ensureIntegerProfile('NAVIMOW.StatisticsQuality', [
+            0 => 'No Data',
+            1 => 'Low',
+            2 => 'Medium',
+            3 => 'High',
+        ]);
+
+        self::ensureFloatProfile('NAVIMOW.Percentage', ' %', 1);
+        self::ensureFloatProfile('NAVIMOW.Area', ' m²', 1);
     }
 
     private static function ensureIntegerProfile(string $name, array $associations): void
@@ -70,5 +88,18 @@ final class Profiles
         foreach ($associations as $value => $label) {
             IPS_SetVariableProfileAssociation($name, $value, $label, '', -1);
         }
+    }
+
+    private static function ensureFloatProfile(
+        string $name,
+        string $suffix,
+        int $digits
+    ): void {
+        if (!IPS_VariableProfileExists($name)) {
+            IPS_CreateVariableProfile($name, 2);
+        }
+
+        IPS_SetVariableProfileDigits($name, $digits);
+        IPS_SetVariableProfileText($name, '', $suffix);
     }
 }

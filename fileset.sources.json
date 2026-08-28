@@ -55,8 +55,8 @@
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/form.json",
             "target": "NavimowDevice/form.json",
-            "sha256": "1af3f7ee0469dc5aa596f1ad1e34cfba9a5034eacfb7a408e7f0f2f838c7dc9f",
-            "bytes": 2596
+            "sha256": "c5c346ece8528a2f93cf7602590d1b6e88a5b144d811dcfcf19949143933a84d",
+            "bytes": 2730
         },
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/locale.json",
@@ -73,8 +73,8 @@
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/module.php",
             "target": "NavimowDevice/module.php",
-            "sha256": "7d92029103ab59dd900ded56a0d329e0fb23744833a17fb8e4d33347ef8c627a",
-            "bytes": 48172
+            "sha256": "76b43d6bad90c5467db60f5bc2790e3cb55834902d8ef662e9a70e71a87002d8",
+            "bytes": 57087
         },
         {
             "source": "case-studies/navimow/distribution/NavimowMqttReceiver/form.json",
@@ -127,8 +127,8 @@
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/LocalMapSvgRenderer.php",
             "target": "libs/Navimow/LocalMapSvgRenderer.php",
-            "sha256": "12f09fd967b14775c042e196de747c861e9afe0b6a73b9be75e4a97186e48fbc",
-            "bytes": 25933
+            "sha256": "82e5bfd57791e03dc1d933e2d7728fd8cb53e116d8f6900bbfa7bddd6641e8b3",
+            "bytes": 30118
         },
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/MapGeometryReducer.php",
@@ -211,8 +211,8 @@
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/Profiles.php",
             "target": "libs/Navimow/Profiles.php",
-            "sha256": "f70d6ae4348461925cebebf791db817afcbc9a166d58c376ddb28f8384a7b778",
-            "bytes": 1962
+            "sha256": "966e85a7c80960b4ba9f726a6e2930fbf19cbd6a88c8cfac2f2cdbdcc5d1349a",
+            "bytes": 2844
         },
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/RevisionBoundedTrackStore.php",
@@ -233,7 +233,7 @@
             "bytes": 3780
         }
     ],
-    "filesetSha256": "b900e590c1cb0a0ca5697066e1c85f05d5ca548b0cd2c988249061b48a205cdd",
+    "filesetSha256": "4c0d7ac0b1a7834c2ee33f2554f5eb643d92fc9ab72056a1cc0a9f42399102e3",
     "builderVersion": "1.0.0",
     "license": {
         "identifier": "PolyForm-Noncommercial-1.0.0",

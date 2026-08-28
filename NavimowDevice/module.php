@@ -65,6 +65,7 @@ class NavimowDevice extends IPSModule
         $this->RegisterPropertyString('DisplayName', '');
         $this->RegisterPropertyBoolean('DebugPayloads', false);
         $this->RegisterPropertyBoolean('EnableLocalMap', false);
+        $this->RegisterPropertyBoolean('EnableZoneStatistics', false);
         $this->RegisterPropertyString('AcceptedMapProjection', '');
         $this->RegisterPropertyString('AcceptedGeometryKey', '');
         $this->RegisterPropertyString('HiddenZoneSequences', '[1]');
@@ -83,6 +84,7 @@ class NavimowDevice extends IPSModule
         $this->RegisterAttributeString('LocalMapRevisionRegistry', '{}');
         $this->RegisterAttributeString('LocalMapTrackState', '{}');
         $this->RegisterAttributeString('LocalMapStatisticsState', '{}');
+        $this->RegisterAttributeString('LocalMapStatisticsGeometryKey', '');
         $this->RegisterAttributeString('LocalMapRenderMetadata', '{}');
         $this->RegisterAttributeString('LocalMapErrorHistory', '[]');
 
@@ -114,6 +116,12 @@ class NavimowDevice extends IPSModule
         $this->RegisterVariableInteger('LastCommandResult', 'Last Command Result', 'NAVIMOW.CommandResult', 70);
         $this->RegisterVariableString('LastCommandError', 'Last Command Error', '', 80);
         $this->RegisterVariableString('LocalMap', 'Local Map', '~HTMLBox', 100);
+
+        if ($this->ReadPropertyBoolean('EnableZoneStatistics')) {
+            $this->registerZoneStatisticsVariables();
+        } elseif ($this->variableExists('StatisticsState')) {
+            $this->SetValue('StatisticsState', 0);
+        }
 
         if ($this->ReadPropertyBoolean('DebugPayloads')) {
             $this->RegisterVariableString('RawStatusJson', 'Raw Status JSON', '', 90);
@@ -224,6 +232,12 @@ class NavimowDevice extends IPSModule
                         $stored['segmentCount'],
                         $stored['pointCount']
                     );
+                    $this->updateZoneStatisticsVariables(
+                        $package,
+                        $stored['statistics'],
+                        null,
+                        true
+                    );
                     $this->scheduleLocalMapRefresh();
                     return 'Local map rendered without fresh MQTT evidence.';
                 }
@@ -301,6 +315,9 @@ class NavimowDevice extends IPSModule
             );
             $svg = Navimow\LocalMapSvgRenderer::render($scene, [
                 'stationState' => $this->localMapStationState(),
+                'mowerState' => $this->localMapMowerState(),
+                'showMower' => $status === 'ok'
+                    && $this->localMapMowerState() !== 'docked',
                 'hiddenZoneSequences' => $this->hiddenZoneSequences(),
                 'theme' => $this->localMapTheme(),
             ]);
@@ -318,6 +335,10 @@ class NavimowDevice extends IPSModule
                 json_encode($statistics, JSON_THROW_ON_ERROR)
             );
             $this->WriteAttributeString(
+                'LocalMapStatisticsGeometryKey',
+                $geometryKey
+            );
+            $this->WriteAttributeString(
                 'LocalMapRevisionRegistry',
                 json_encode([
                     'formatVersion' => 1,
@@ -326,6 +347,12 @@ class NavimowDevice extends IPSModule
                 ], JSON_THROW_ON_ERROR)
             );
             $this->SetValue('LocalMap', $svg);
+            $this->updateZoneStatisticsVariables(
+                $package,
+                $statistics,
+                $evidence['observedAt'],
+                false
+            );
             $this->writeLocalMapMetadata(
                 $status,
                 $geometryKey,
@@ -337,6 +364,12 @@ class NavimowDevice extends IPSModule
             return 'Local map refresh succeeded.';
         } catch (Throwable $exception) {
             $this->recordLocalMapError($exception->getMessage());
+            if (
+                $this->ReadPropertyBoolean('EnableZoneStatistics')
+                && $this->variableExists('StatisticsState')
+            ) {
+                $this->SetValue('StatisticsState', 4);
+            }
             $this->scheduleLocalMapRefresh();
             return 'Local map refresh failed.';
         } finally {
@@ -1064,6 +1097,192 @@ class NavimowDevice extends IPSModule
         return $theme;
     }
 
+    private function registerZoneStatisticsVariables(): void
+    {
+        $this->RegisterVariableInteger(
+            'StatisticsState',
+            'Zone Statistics State',
+            'NAVIMOW.StatisticsState',
+            110
+        );
+        $this->RegisterVariableInteger(
+            'StatisticsUpdatedAt',
+            'Zone Statistics Updated At',
+            '~UnixTimestamp',
+            115
+        );
+        if ($this->GetValue('StatisticsState') === 0) {
+            $this->SetValue('StatisticsState', 1);
+        }
+
+        try {
+            $definitions = $this->statisticsZoneDefinitions(
+                $this->acceptedLocalMapPackage()
+            );
+        } catch (Throwable) {
+            $this->SetValue('StatisticsState', 4);
+            return;
+        }
+        foreach ($definitions as $index => $definition) {
+            $prefix = 'Zone' . $definition['zoneId'];
+            $name = $definition['label'];
+            $position = 120 + $index * 10;
+            $this->RegisterVariableFloat(
+                $prefix . 'PassProgress',
+                $name . ' - Pass Progress',
+                'NAVIMOW.Percentage',
+                $position
+            );
+            $this->RegisterVariableFloat(
+                $prefix . 'ObservedArea',
+                $name . ' - Observed Area (Retained)',
+                'NAVIMOW.Area',
+                $position + 1
+            );
+            $this->RegisterVariableInteger(
+                $prefix . 'LastObservedAt',
+                $name . ' - Last Observed At',
+                '~UnixTimestamp',
+                $position + 2
+            );
+            $this->RegisterVariableInteger(
+                $prefix . 'StatisticsQuality',
+                $name . ' - Statistics Quality',
+                'NAVIMOW.StatisticsQuality',
+                $position + 3
+            );
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $package
+     *
+     * @return list<array{zoneId: int, zoneKey: string, label: string}>
+     */
+    private function statisticsZoneDefinitions(array $package): array
+    {
+        $definitions = [];
+        $seen = [];
+        foreach ($package['bindings'] as $binding) {
+            if (!is_array($binding) || ($binding['zoneKey'] ?? null) === null) {
+                continue;
+            }
+            $zoneId = $binding['zoneId'] ?? null;
+            $zoneKey = $binding['zoneKey'];
+            $label = $binding['label'] ?? null;
+            if (
+                !is_int($zoneId)
+                || $zoneId <= 0
+                || $zoneId > 1000000000
+                || isset($seen[$zoneId])
+                || !is_string($zoneKey)
+                || preg_match('/^[a-f0-9]{64}$/D', $zoneKey) !== 1
+                || !is_string($label)
+                || $label === ''
+                || strlen($label) > 128
+                || preg_match('/[\x00-\x1F\x7F]/', $label) === 1
+            ) {
+                throw new RuntimeException(
+                    'Statistics zone binding is invalid.'
+                );
+            }
+            $seen[$zoneId] = true;
+            $definitions[] = [
+                'zoneId' => $zoneId,
+                'zoneKey' => $zoneKey,
+                'label' => $label,
+            ];
+        }
+
+        return $definitions;
+    }
+
+    /**
+     * @param array<string, mixed> $package
+     * @param array<string, mixed> $statistics
+     */
+    private function updateZoneStatisticsVariables(
+        array $package,
+        array $statistics,
+        ?int $observedAt,
+        bool $stale
+    ): void {
+        if (!$this->ReadPropertyBoolean('EnableZoneStatistics')) {
+            return;
+        }
+        $this->registerZoneStatisticsVariables();
+        $zones = $statistics['zones'] ?? null;
+        if (!is_array($zones) || !array_is_list($zones)) {
+            $this->SetValue('StatisticsState', 4);
+            return;
+        }
+        $byKey = [];
+        foreach ($zones as $zone) {
+            if (
+                !is_array($zone)
+                || !is_string($zone['areaKey'] ?? null)
+            ) {
+                $this->SetValue('StatisticsState', 4);
+                return;
+            }
+            $byKey[$zone['areaKey']] = $zone;
+        }
+        foreach ($this->statisticsZoneDefinitions($package) as $definition) {
+            $zone = $byKey[$definition['zoneKey']] ?? null;
+            if (!is_array($zone)) {
+                continue;
+            }
+            $prefix = 'Zone' . $definition['zoneId'];
+            $latest = $zone['latestPass'] ?? null;
+            $progress = is_array($latest)
+                ? $latest['passProgressPercent'] ?? null
+                : null;
+            $area = $zone['observedAreaTotal'] ?? null;
+            $lastObservedAt = $zone['lastObservedAt'] ?? null;
+            $quality = match ($zone['confidence'] ?? null) {
+                'low' => 1,
+                'medium' => 2,
+                'high' => 3,
+                default => 0,
+            };
+            if (is_int($progress) || is_float($progress)) {
+                $this->SetValue(
+                    $prefix . 'PassProgress',
+                    round((float) $progress, 1)
+                );
+            }
+            if (is_int($area) || is_float($area)) {
+                $this->SetValue(
+                    $prefix . 'ObservedArea',
+                    round(max(0.0, (float) $area), 1)
+                );
+            }
+            if (is_int($lastObservedAt) && $lastObservedAt > 0) {
+                $this->SetValue(
+                    $prefix . 'LastObservedAt',
+                    $lastObservedAt
+                );
+            }
+            $this->SetValue($prefix . 'StatisticsQuality', $quality);
+        }
+        $this->SetValue(
+            'StatisticsState',
+            $zones === [] ? 1 : ($stale ? 3 : 2)
+        );
+        if (!$stale && is_int($observedAt) && $observedAt > 0) {
+            $this->SetValue('StatisticsUpdatedAt', $observedAt);
+        }
+    }
+
+    private function variableExists(string $ident): bool
+    {
+        try {
+            return $this->GetIDForIdent($ident) > 0;
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
     /** @return array<string, mixed> */
     private function restoreLocalMapTrackState(): array
     {
@@ -1076,8 +1295,18 @@ class NavimowDevice extends IPSModule
     }
 
     /** @return array<string, mixed> */
-    private function restoreLocalMapStatistics(): array
+    private function restoreLocalMapStatistics(string $geometryKey): array
     {
+        if (
+            !hash_equals(
+                $geometryKey,
+                $this->ReadAttributeString(
+                    'LocalMapStatisticsGeometryKey'
+                )
+            )
+        ) {
+            return $this->emptyLocalMapStatistics();
+        }
         $encoded = $this->ReadAttributeString('LocalMapStatisticsState');
         if ($encoded === '' || $encoded === '{}') {
             return $this->emptyLocalMapStatistics();
@@ -1105,16 +1334,17 @@ class NavimowDevice extends IPSModule
     /**
      * @param array<string, mixed> $package
      *
-     * @return array{svg: string, segmentCount: int, pointCount: int}
+     * @return array{svg: string, segmentCount: int, pointCount: int, statistics: array<string, mixed>}
      */
     private function renderStoredLocalMap(
         array $package,
         string $geometryKey
     ): array {
+        $statistics = $this->restoreLocalMapStatistics($geometryKey);
         $scene = Navimow\LocalMapSceneProjector::build(
             $package['geometry'],
             $this->emptyLocalMapPath(),
-            $this->restoreLocalMapStatistics(),
+            $statistics,
             $package['bindings'],
             [
                 'currentGeometryKey' => $geometryKey,
@@ -1134,11 +1364,14 @@ class NavimowDevice extends IPSModule
         return [
             'svg' => Navimow\LocalMapSvgRenderer::render($scene, [
                 'stationState' => $this->localMapStationState(),
+                'mowerState' => $this->localMapMowerState(),
+                'showMower' => false,
                 'hiddenZoneSequences' => $this->hiddenZoneSequences(),
                 'theme' => $this->localMapTheme(),
             ]),
             'segmentCount' => $projection['segmentCount'],
             'pointCount' => $projection['pointCount'],
+            'statistics' => $statistics,
         ];
     }
 
@@ -1194,6 +1427,37 @@ class NavimowDevice extends IPSModule
         }
 
         return 'unknown';
+    }
+
+    private function localMapMowerState(): string
+    {
+        $lastUpdate = $this->GetValue('LastStatusUpdate');
+        $online = $this->GetValue('Online');
+        if (
+            !is_int($lastUpdate)
+            || $lastUpdate <= 0
+            || $this->currentTimestamp() - $lastUpdate
+                > self::LOCAL_MAP_REST_STALE_SECONDS
+        ) {
+            return 'unknown';
+        }
+
+        $state = $this->GetValue('VehicleState');
+        if ($state === self::VEHICLE_STATE_OFFLINE) {
+            return 'offline';
+        }
+        if ($online !== true) {
+            return 'unknown';
+        }
+
+        return match ($state) {
+            1, 6 => 'active',
+            3, 4, 10 => 'paused',
+            self::VEHICLE_STATE_DOCKING => 'returning',
+            7, 8 => 'attention',
+            self::VEHICLE_STATE_DOCKED => 'docked',
+            default => 'unknown',
+        };
     }
 
     private function trackRetentionHours(): int

@@ -29,14 +29,18 @@ Implemented:
 - bounded token-refresh transport recovery.
 - optional, disabled-by-default receive-only MQTT shadow transport;
 - bounded position diagnostics using local-map coordinates;
-- a privacy-safe retained task observation ledger for inferred zone passes.
+- a privacy-safe retained task observation ledger for inferred zone passes;
+- an optional revision-bound local map with REST-authoritative station and
+  mower-state colors;
+- optional per-zone pass-progress, retained observed-area, freshness and
+  evidence-quality variables.
 
 Not implemented:
 
 - Start;
 - Stop;
-- public MQTT-driven variables or MQTT device commands;
-- a user-facing map or area-statistics model;
+- MQTT device commands;
+- geometric mowing-coverage percentages;
 - Symcon Store packaging.
 
 ## Installation

@@ -228,12 +228,15 @@ final class LocalMapSvgRenderer
         }
 
         $mowerMarkup = '';
-        if ($latest !== null) {
+        if ($latest !== null && $presentation['showMower']) {
             $mower = self::project($latest, $viewport);
+            $mowerState = $presentation['mowerState'];
             $mowerMarkup = sprintf(
-                '<g class="mower" transform="translate(%s %s)"><circle r="1.8"/><circle r="0.55"/></g>',
+                '<g class="mower mower-%s" transform="translate(%s %s)"><title>%s</title><circle r="1.8"/><circle r="0.55"/></g>',
+                self::escape($mowerState),
                 self::number($mower[0]),
-                self::number($mower[1])
+                self::number($mower[1]),
+                self::escape(self::mowerTitle($mowerState))
             );
         }
 
@@ -401,7 +404,7 @@ final class LocalMapSvgRenderer
 
     /**
      * @param array<string, float> $viewport
-     * @param array{hiddenZoneSequences: list<int>, stationState: string, theme: string} $presentation
+     * @param array{hiddenZoneSequences: list<int>, stationState: string, mowerState: string, showMower: bool, theme: string} $presentation
      */
     private static function legendMarkup(
         array $viewport,
@@ -412,18 +415,20 @@ final class LocalMapSvgRenderer
         $row = $font * 1.55;
         $padding = $font * 0.8;
         $width = min(
-            $viewport['width'] * 0.42,
-            max(18.0, $font * 12.5)
+            $viewport['width'] * 0.52,
+            max(26.0, $font * 18.0)
         );
-        $height = $padding * 2.0 + $row * 5.0;
+        $height = $padding * 2.0 + $row * 10.0;
         $inset = max(0.8, $span / 110.0);
         $x = $viewport['maximumX'] - $inset - $width;
         $y = $viewport['maximumY'] - $inset - $height;
         $iconX = $padding + $font * 0.75;
-        $labelX = $padding + $font * 2.45;
+        $labelX = $padding + $font * 2.1;
+        $secondColumnX = $width * 0.52;
         $rowY = static fn (int $index): float =>
             $padding + $row * ($index + 0.62);
         $stationState = self::escape($presentation['stationState']);
+        $mowerState = self::escape($presentation['mowerState']);
         $text = static fn (float $yValue, string $label): string => sprintf(
             '<text class="legend-label" x="%s" y="%s">%s</text>',
             self::number($labelX),
@@ -431,8 +436,26 @@ final class LocalMapSvgRenderer
             self::escape($label)
         );
 
+        $stateRow = static function (
+            float $xValue,
+            float $yValue,
+            string $class,
+            string $label
+        ) use ($font): string {
+            return sprintf(
+                '<circle class="legend-state %s" cx="%s" cy="%s" r="%s"/><text class="legend-state-label" x="%s" y="%s">%s</text>',
+                self::escape($class),
+                self::number($xValue),
+                self::number($yValue),
+                self::number($font * 0.28),
+                self::number($xValue + $font * 0.62),
+                self::number($yValue),
+                self::escape($label)
+            );
+        };
+
         return sprintf(
-            '<g class="legend" transform="translate(%s %s)"><title>Symbollegende</title><rect class="legend-background" width="%s" height="%s" rx="%s"/><g class="legend-station legend-station-%s" transform="translate(%s %s)"><rect x="-1.25" y="-.8" width="2.5" height="1.6" rx=".3"/><path d="M-.7 0h1.4M0-.45v.9"/></g>%s<g class="legend-mower" transform="translate(%s %s)"><circle r=".85"/><circle r=".26"/></g>%s<line class="legend-path" x1="%s" x2="%s" y1="%s" y2="%s"/>%s<rect class="legend-obstacle" x="%s" y="%s" width="%s" height="%s" rx=".25"/>%s<g class="legend-points" transform="translate(%s %s)"><circle class="legend-point-outside" cx="-.9" r=".38"><title>Außerhalb der Kartenzone</title></circle><circle class="legend-point-ambiguous" r=".38"><title>Uneindeutige Zonenzuordnung</title></circle><circle class="legend-point-unknown" cx=".9" r=".38"><title>Unbekannte Aufgabenzone</title></circle></g>%s</g>',
+            '<g class="legend" transform="translate(%s %s)"><title>Symbollegende</title><rect class="legend-background" width="%s" height="%s" rx="%s"/><g class="legend-station legend-station-%s" transform="translate(%s %s)"><rect x="-1.25" y="-.8" width="2.5" height="1.6" rx=".3"/><path d="M-.7 0h1.4M0-.45v.9"/></g>%s<g class="legend-mower legend-mower-%s" transform="translate(%s %s)"><circle r=".85"/><circle r=".26"/></g>%s%s%s%s%s%s%s%s%s%s%s<line class="legend-path" x1="%s" x2="%s" y1="%s" y2="%s"/>%s<rect class="legend-obstacle" x="%s" y="%s" width="%s" height="%s" rx=".25"/>%s<g class="legend-points" transform="translate(%s %s)"><circle class="legend-point-outside" cx="-.9" r=".38"><title>Außerhalb der Kartenzone</title></circle><circle class="legend-point-ambiguous" r=".38"><title>Uneindeutige Zonenzuordnung</title></circle><circle class="legend-point-unknown" cx=".9" r=".38"><title>Unbekannte Aufgabenzone</title></circle></g>%s</g>',
             self::number($x),
             self::number($y),
             self::number($width),
@@ -442,22 +465,37 @@ final class LocalMapSvgRenderer
             self::number($iconX),
             self::number($rowY(0)),
             $text($rowY(0), 'Station'),
+            $mowerState,
+            self::number($secondColumnX + $font * 0.75),
+            self::number($rowY(0)),
+            sprintf(
+                '<text class="legend-label" x="%s" y="%s">Mäher</text>',
+                self::number($secondColumnX + $font * 2.1),
+                self::number($rowY(0))
+            ),
+            $stateRow($padding, $rowY(1), 'state-docked', 'Angedockt'),
+            $stateRow($padding, $rowY(2), 'state-returning', 'Rückfahrt'),
+            $stateRow($padding, $rowY(3), 'state-away', 'Unterwegs'),
+            $stateRow($padding, $rowY(4), 'state-unknown', 'Unbekannt'),
+            $stateRow($secondColumnX, $rowY(1), 'state-active', 'Aktiv'),
+            $stateRow($secondColumnX, $rowY(2), 'state-paused', 'Pause/Bereit'),
+            $stateRow($secondColumnX, $rowY(3), 'state-returning', 'Rückfahrt'),
+            $stateRow($secondColumnX, $rowY(4), 'state-attention', 'Störung'),
+            $stateRow($secondColumnX, $rowY(5), 'state-offline', 'Offline'),
+            $stateRow($secondColumnX, $rowY(6), 'state-unknown', 'Unbekannt'),
             self::number($iconX),
-            self::number($rowY(1)),
-            $text($rowY(1), 'Mäher'),
+            self::number($iconX + $font * 1.5),
+            self::number($rowY(7)),
+            self::number($rowY(7)),
+            $text($rowY(7), 'Fahrspur'),
             self::number($iconX - $font * 0.75),
-            self::number($iconX + $font * 0.75),
-            self::number($rowY(2)),
-            self::number($rowY(2)),
-            $text($rowY(2), 'Fahrspur'),
-            self::number($iconX - $font * 0.75),
-            self::number($rowY(3) - $font * 0.45),
+            self::number($rowY(8) - $font * 0.45),
             self::number($font * 1.5),
             self::number($font * 0.9),
-            $text($rowY(3), 'Sperrbereich'),
+            $text($rowY(8), 'Sperrbereich'),
             self::number($iconX),
-            self::number($rowY(4)),
-            $text($rowY(4), 'Zuordnung prüfen')
+            self::number($rowY(9)),
+            $text($rowY(9), 'Zuordnung prüfen')
         );
     }
 
@@ -496,7 +534,7 @@ final class LocalMapSvgRenderer
             ];
 
         return sprintf(
-            '.background{fill:%4$s}.zone{fill-opacity:.62;stroke-width:%1$s;vector-effect:non-scaling-stroke}.obstacle{fill:%5$s;fill-opacity:.08;stroke:%6$s;stroke-width:%1$s;stroke-dasharray:1.1 .8;vector-effect:non-scaling-stroke}.obstacle-ambiguous{fill:#ef6461;fill-opacity:.1;stroke:#ef6461}.path{fill:none;stroke:%7$s;stroke-width:%2$s;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}.path-point{stroke:%8$s;stroke-width:%1$s;vector-effect:non-scaling-stroke}.path-point-outside{fill:#ff9f43}.path-point-ambiguous{fill:#ef6461}.path-point-unknown-task-zone{fill:#a78bfa}.station rect{stroke-width:%1$s;vector-effect:non-scaling-stroke}.station path{fill:none;stroke-width:%1$s;stroke-linecap:round;vector-effect:non-scaling-stroke}.station-docked rect{fill:#22a06b;stroke:#0d5037}.station-docked path{stroke:#e2fff1}.station-docking rect{fill:#d98b22;stroke:#70420a}.station-docking path{stroke:#fff1cd}.station-undocked rect{fill:#75818a;stroke:#29333a}.station-undocked path{stroke:#f4f7f8}.station-unknown rect{fill:#17877d;stroke:#073f3a}.station-unknown path{stroke:#d9fffa}.mower circle:first-child{fill:#39d98a;stroke:#0b3b29;stroke-width:%1$s;vector-effect:non-scaling-stroke}.mower circle:last-child{fill:#0b3b29}.zone-label{font-family:system-ui,sans-serif;font-size:%3$spx;text-anchor:middle;dominant-baseline:middle;fill:%9$s;paint-order:stroke;stroke:%10$s;stroke-width:.35;stroke-linejoin:round;letter-spacing:0}.legend{pointer-events:none}.legend-background{fill:%11$s;fill-opacity:.9;stroke:%12$s;stroke-width:%1$s;vector-effect:non-scaling-stroke}.legend-label{font-family:system-ui,sans-serif;font-size:%13$spx;dominant-baseline:middle;fill:%14$s;letter-spacing:0}.legend-station rect{stroke-width:%1$s;vector-effect:non-scaling-stroke}.legend-station path{fill:none;stroke-width:%1$s;stroke-linecap:round;vector-effect:non-scaling-stroke}.legend-station-docked rect{fill:#22a06b;stroke:#0d5037}.legend-station-docked path{stroke:#e2fff1}.legend-station-docking rect{fill:#d98b22;stroke:#70420a}.legend-station-docking path{stroke:#fff1cd}.legend-station-undocked rect{fill:#75818a;stroke:#29333a}.legend-station-undocked path{stroke:#f4f7f8}.legend-station-unknown rect{fill:#17877d;stroke:#073f3a}.legend-station-unknown path{stroke:#d9fffa}.legend-mower circle:first-child{fill:#39d98a;stroke:#0b3b29;stroke-width:%1$s;vector-effect:non-scaling-stroke}.legend-mower circle:last-child{fill:#0b3b29}.legend-path{stroke:%7$s;stroke-width:%2$s;stroke-linecap:round;vector-effect:non-scaling-stroke}.legend-obstacle{fill:%5$s;fill-opacity:.08;stroke:%6$s;stroke-width:%1$s;stroke-dasharray:1.1 .8;vector-effect:non-scaling-stroke}.legend-points circle{stroke:%8$s;stroke-width:%1$s;vector-effect:non-scaling-stroke}.legend-point-outside{fill:#ff9f43}.legend-point-ambiguous{fill:#ef6461}.legend-point-unknown{fill:#a78bfa}',
+            '.background{fill:%4$s}.zone{fill-opacity:.62;stroke-width:%1$s;vector-effect:non-scaling-stroke}.obstacle{fill:%5$s;fill-opacity:.08;stroke:%6$s;stroke-width:%1$s;stroke-dasharray:1.1 .8;vector-effect:non-scaling-stroke}.obstacle-ambiguous{fill:#ef6461;fill-opacity:.1;stroke:#ef6461}.path{fill:none;stroke:%7$s;stroke-width:%2$s;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}.path-point{stroke:%8$s;stroke-width:%1$s;vector-effect:non-scaling-stroke}.path-point-outside{fill:#ff9f43}.path-point-ambiguous{fill:#ef6461}.path-point-unknown-task-zone{fill:#a78bfa}.station rect{stroke-width:%1$s;vector-effect:non-scaling-stroke}.station path{fill:none;stroke-width:%1$s;stroke-linecap:round;vector-effect:non-scaling-stroke}.station-docked rect{fill:#22a06b;stroke:#0d5037}.station-docked path{stroke:#e2fff1}.station-docking rect{fill:#d98b22;stroke:#70420a}.station-docking path{stroke:#fff1cd}.station-undocked rect{fill:#75818a;stroke:#29333a}.station-undocked path{stroke:#f4f7f8}.station-unknown rect{fill:#17877d;stroke:#073f3a}.station-unknown path{stroke:#d9fffa}.mower circle:first-of-type,.legend-mower circle:first-of-type{stroke-width:%1$s;vector-effect:non-scaling-stroke}.mower circle:last-of-type,.legend-mower circle:last-of-type{fill:#0b3b29}.mower-active circle:first-of-type,.legend-mower-active circle:first-of-type,.state-active{fill:#39d98a;stroke:#0b3b29}.mower-paused circle:first-of-type,.legend-mower-paused circle:first-of-type,.state-paused{fill:#e3b341;stroke:#6e4b0a}.mower-returning circle:first-of-type,.legend-mower-returning circle:first-of-type,.state-returning{fill:#d98b22;stroke:#70420a}.mower-attention circle:first-of-type,.legend-mower-attention circle:first-of-type,.state-attention{fill:#ef6461;stroke:#6b1f1d}.mower-offline circle:first-of-type,.legend-mower-offline circle:first-of-type,.state-offline,.state-away{fill:#75818a;stroke:#29333a}.mower-unknown circle:first-of-type,.legend-mower-unknown circle:first-of-type,.state-unknown{fill:#17877d;stroke:#073f3a}.mower-docked circle:first-of-type,.legend-mower-docked circle:first-of-type,.state-docked{fill:#22a06b;stroke:#0d5037}.zone-label{font-family:system-ui,sans-serif;font-size:%3$spx;text-anchor:middle;dominant-baseline:middle;fill:%9$s;paint-order:stroke;stroke:%10$s;stroke-width:.35;stroke-linejoin:round;letter-spacing:0}.legend{pointer-events:none}.legend-background{fill:%11$s;fill-opacity:.9;stroke:%12$s;stroke-width:%1$s;vector-effect:non-scaling-stroke}.legend-label{font-family:system-ui,sans-serif;font-size:%13$spx;font-weight:600;dominant-baseline:middle;fill:%14$s;letter-spacing:0}.legend-state{stroke-width:%1$s;vector-effect:non-scaling-stroke}.legend-state-label{font-family:system-ui,sans-serif;font-size:%13$spx;dominant-baseline:middle;fill:%14$s;letter-spacing:0}.legend-station rect{stroke-width:%1$s;vector-effect:non-scaling-stroke}.legend-station path{fill:none;stroke-width:%1$s;stroke-linecap:round;vector-effect:non-scaling-stroke}.legend-station-docked rect{fill:#22a06b;stroke:#0d5037}.legend-station-docked path{stroke:#e2fff1}.legend-station-docking rect{fill:#d98b22;stroke:#70420a}.legend-station-docking path{stroke:#fff1cd}.legend-station-undocked rect{fill:#75818a;stroke:#29333a}.legend-station-undocked path{stroke:#f4f7f8}.legend-station-unknown rect{fill:#17877d;stroke:#073f3a}.legend-station-unknown path{stroke:#d9fffa}.legend-path{stroke:%7$s;stroke-width:%2$s;stroke-linecap:round;vector-effect:non-scaling-stroke}.legend-obstacle{fill:%5$s;fill-opacity:.08;stroke:%6$s;stroke-width:%1$s;stroke-dasharray:1.1 .8;vector-effect:non-scaling-stroke}.legend-points circle{stroke:%8$s;stroke-width:%1$s;vector-effect:non-scaling-stroke}.legend-point-outside{fill:#ff9f43}.legend-point-ambiguous{fill:#ef6461}.legend-point-unknown{fill:#a78bfa}',
             self::number($stroke),
             self::number($path),
             self::number($font),
@@ -517,23 +555,40 @@ final class LocalMapSvgRenderer
     /**
      * @param array<string, mixed> $options
      *
-     * @return array{hiddenZoneSequences: list<int>, stationState: string, theme: string}
+     * @return array{hiddenZoneSequences: list<int>, stationState: string, mowerState: string, showMower: bool, theme: string}
      */
     private static function options(array $options): array
     {
         $hidden = $options['hiddenZoneSequences'] ?? [];
         $stationState = $options['stationState'] ?? 'unknown';
+        $mowerState = $options['mowerState'] ?? 'unknown';
+        $showMower = $options['showMower'] ?? true;
         $theme = $options['theme'] ?? 'dark';
         if (
             !is_array($hidden)
             || !array_is_list($hidden)
             || count($hidden) > self::MAX_ZONES
             || !is_string($stationState)
+            || !is_string($mowerState)
+            || !is_bool($showMower)
             || !is_string($theme)
             || !in_array($theme, ['dark', 'light'], true)
             || !in_array(
                 $stationState,
                 ['docked', 'docking', 'undocked', 'unknown'],
+                true
+            )
+            || !in_array(
+                $mowerState,
+                [
+                    'active',
+                    'paused',
+                    'returning',
+                    'attention',
+                    'offline',
+                    'docked',
+                    'unknown',
+                ],
                 true
             )
         ) {
@@ -559,6 +614,8 @@ final class LocalMapSvgRenderer
         return [
             'hiddenZoneSequences' => $hidden,
             'stationState' => $stationState,
+            'mowerState' => $mowerState,
+            'showMower' => $showMower,
             'theme' => $theme,
         ];
     }
@@ -572,6 +629,22 @@ final class LocalMapSvgRenderer
             'unknown' => 'Dock state unknown',
             default => throw new InvalidArgumentException(
                 'Station state is invalid.'
+            ),
+        };
+    }
+
+    private static function mowerTitle(string $state): string
+    {
+        return match ($state) {
+            'active' => 'Mower active',
+            'paused' => 'Mower paused or ready',
+            'returning' => 'Mower returning to station',
+            'attention' => 'Mower needs attention',
+            'offline' => 'Mower offline',
+            'docked' => 'Mower docked',
+            'unknown' => 'Mower state unknown',
+            default => throw new InvalidArgumentException(
+                'Mower state is invalid.'
             ),
         };
     }
