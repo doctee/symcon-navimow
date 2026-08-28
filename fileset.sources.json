@@ -127,8 +127,8 @@
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/LocalMapSvgRenderer.php",
             "target": "libs/Navimow/LocalMapSvgRenderer.php",
-            "sha256": "2dcb883935a502a61ddc0bd796af63932955694af9b62adbd3f5ed7b4f929993",
-            "bytes": 20776
+            "sha256": "12f09fd967b14775c042e196de747c861e9afe0b6a73b9be75e4a97186e48fbc",
+            "bytes": 25933
         },
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/MapGeometryReducer.php",
@@ -233,7 +233,7 @@
             "bytes": 3780
         }
     ],
-    "filesetSha256": "a89dd1cce971342093cf70520f9d9e626106acbc0a2180dbeea192c78684c826",
+    "filesetSha256": "b900e590c1cb0a0ca5697066e1c85f05d5ca548b0cd2c988249061b48a205cdd",
     "builderVersion": "1.0.0",
     "license": {
         "identifier": "PolyForm-Noncommercial-1.0.0",

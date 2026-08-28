@@ -237,6 +237,8 @@ final class LocalMapSvgRenderer
             );
         }
 
+        $legendMarkup = self::legendMarkup($viewport, $presentation);
+
         $viewBox = implode(' ', array_map(
             [self::class, 'number'],
             [
@@ -247,7 +249,7 @@ final class LocalMapSvgRenderer
             ]
         ));
         $svg = sprintf(
-            '<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Local mower map" data-theme="%s" viewBox="%s" preserveAspectRatio="xMidYMid meet"><style>%s</style><rect class="background" x="%s" y="%s" width="%s" height="%s"/>%s%s%s%s%s%s</svg>',
+            '<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Local mower map" data-theme="%s" viewBox="%s" preserveAspectRatio="xMidYMid meet"><style>%s</style><rect class="background" x="%s" y="%s" width="%s" height="%s"/>%s%s%s%s%s%s%s</svg>',
             self::escape($presentation['theme']),
             $viewBox,
             self::styles($viewport, $presentation['theme']),
@@ -260,7 +262,8 @@ final class LocalMapSvgRenderer
             implode('', $pathMarkup),
             implode('', $diagnosticPointMarkup),
             $stationMarkup . $mowerMarkup,
-            implode('', $labelMarkup)
+            implode('', $labelMarkup),
+            $legendMarkup
         );
         if (strlen($svg) > self::MAX_OUTPUT_BYTES) {
             throw new InvalidArgumentException(
@@ -396,6 +399,68 @@ final class LocalMapSvgRenderer
         );
     }
 
+    /**
+     * @param array<string, float> $viewport
+     * @param array{hiddenZoneSequences: list<int>, stationState: string, theme: string} $presentation
+     */
+    private static function legendMarkup(
+        array $viewport,
+        array $presentation
+    ): string {
+        $span = max($viewport['width'], $viewport['height']);
+        $font = max(1.35, min(1.9, $span / 58.0));
+        $row = $font * 1.55;
+        $padding = $font * 0.8;
+        $width = min(
+            $viewport['width'] * 0.42,
+            max(18.0, $font * 12.5)
+        );
+        $height = $padding * 2.0 + $row * 5.0;
+        $inset = max(0.8, $span / 110.0);
+        $x = $viewport['maximumX'] - $inset - $width;
+        $y = $viewport['maximumY'] - $inset - $height;
+        $iconX = $padding + $font * 0.75;
+        $labelX = $padding + $font * 2.45;
+        $rowY = static fn (int $index): float =>
+            $padding + $row * ($index + 0.62);
+        $stationState = self::escape($presentation['stationState']);
+        $text = static fn (float $yValue, string $label): string => sprintf(
+            '<text class="legend-label" x="%s" y="%s">%s</text>',
+            self::number($labelX),
+            self::number($yValue),
+            self::escape($label)
+        );
+
+        return sprintf(
+            '<g class="legend" transform="translate(%s %s)"><title>Symbollegende</title><rect class="legend-background" width="%s" height="%s" rx="%s"/><g class="legend-station legend-station-%s" transform="translate(%s %s)"><rect x="-1.25" y="-.8" width="2.5" height="1.6" rx=".3"/><path d="M-.7 0h1.4M0-.45v.9"/></g>%s<g class="legend-mower" transform="translate(%s %s)"><circle r=".85"/><circle r=".26"/></g>%s<line class="legend-path" x1="%s" x2="%s" y1="%s" y2="%s"/>%s<rect class="legend-obstacle" x="%s" y="%s" width="%s" height="%s" rx=".25"/>%s<g class="legend-points" transform="translate(%s %s)"><circle class="legend-point-outside" cx="-.9" r=".38"><title>Außerhalb der Kartenzone</title></circle><circle class="legend-point-ambiguous" r=".38"><title>Uneindeutige Zonenzuordnung</title></circle><circle class="legend-point-unknown" cx=".9" r=".38"><title>Unbekannte Aufgabenzone</title></circle></g>%s</g>',
+            self::number($x),
+            self::number($y),
+            self::number($width),
+            self::number($height),
+            self::number($font * 0.38),
+            $stationState,
+            self::number($iconX),
+            self::number($rowY(0)),
+            $text($rowY(0), 'Station'),
+            self::number($iconX),
+            self::number($rowY(1)),
+            $text($rowY(1), 'Mäher'),
+            self::number($iconX - $font * 0.75),
+            self::number($iconX + $font * 0.75),
+            self::number($rowY(2)),
+            self::number($rowY(2)),
+            $text($rowY(2), 'Fahrspur'),
+            self::number($iconX - $font * 0.75),
+            self::number($rowY(3) - $font * 0.45),
+            self::number($font * 1.5),
+            self::number($font * 0.9),
+            $text($rowY(3), 'Sperrbereich'),
+            self::number($iconX),
+            self::number($rowY(4)),
+            $text($rowY(4), 'Zuordnung prüfen')
+        );
+    }
+
     /** @param array<string, float> $viewport */
     private static function styles(array $viewport, string $theme): string
     {
@@ -413,6 +478,9 @@ final class LocalMapSvgRenderer
                 'pointStroke' => '#171b1f',
                 'label' => '#f2f5f4',
                 'labelStroke' => '#171b1f',
+                'legendBackground' => '#20262b',
+                'legendBorder' => '#59656d',
+                'legendText' => '#e8edef',
             ]
             : [
                 'background' => '#f8fafc',
@@ -422,10 +490,13 @@ final class LocalMapSvgRenderer
                 'pointStroke' => '#ffffff',
                 'label' => '#111827',
                 'labelStroke' => '#ffffff',
+                'legendBackground' => '#ffffff',
+                'legendBorder' => '#cbd5e1',
+                'legendText' => '#1f2937',
             ];
 
         return sprintf(
-            '.background{fill:%4$s}.zone{fill-opacity:.62;stroke-width:%1$s;vector-effect:non-scaling-stroke}.obstacle{fill:%5$s;fill-opacity:.08;stroke:%6$s;stroke-width:%1$s;stroke-dasharray:1.1 .8;vector-effect:non-scaling-stroke}.obstacle-ambiguous{fill:#ef6461;fill-opacity:.1;stroke:#ef6461}.path{fill:none;stroke:%7$s;stroke-width:%2$s;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}.path-point{stroke:%8$s;stroke-width:%1$s;vector-effect:non-scaling-stroke}.path-point-outside{fill:#ff9f43}.path-point-ambiguous{fill:#ef6461}.path-point-unknown-task-zone{fill:#a78bfa}.station rect{stroke-width:%1$s;vector-effect:non-scaling-stroke}.station path{fill:none;stroke-width:%1$s;stroke-linecap:round;vector-effect:non-scaling-stroke}.station-docked rect{fill:#22a06b;stroke:#0d5037}.station-docked path{stroke:#e2fff1}.station-docking rect{fill:#d98b22;stroke:#70420a}.station-docking path{stroke:#fff1cd}.station-undocked rect{fill:#75818a;stroke:#29333a}.station-undocked path{stroke:#f4f7f8}.station-unknown rect{fill:#17877d;stroke:#073f3a}.station-unknown path{stroke:#d9fffa}.mower circle:first-child{fill:#39d98a;stroke:#0b3b29;stroke-width:%1$s;vector-effect:non-scaling-stroke}.mower circle:last-child{fill:#0b3b29}.zone-label{font-family:system-ui,sans-serif;font-size:%3$spx;text-anchor:middle;dominant-baseline:middle;fill:%9$s;paint-order:stroke;stroke:%10$s;stroke-width:.35;stroke-linejoin:round;letter-spacing:0}',
+            '.background{fill:%4$s}.zone{fill-opacity:.62;stroke-width:%1$s;vector-effect:non-scaling-stroke}.obstacle{fill:%5$s;fill-opacity:.08;stroke:%6$s;stroke-width:%1$s;stroke-dasharray:1.1 .8;vector-effect:non-scaling-stroke}.obstacle-ambiguous{fill:#ef6461;fill-opacity:.1;stroke:#ef6461}.path{fill:none;stroke:%7$s;stroke-width:%2$s;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}.path-point{stroke:%8$s;stroke-width:%1$s;vector-effect:non-scaling-stroke}.path-point-outside{fill:#ff9f43}.path-point-ambiguous{fill:#ef6461}.path-point-unknown-task-zone{fill:#a78bfa}.station rect{stroke-width:%1$s;vector-effect:non-scaling-stroke}.station path{fill:none;stroke-width:%1$s;stroke-linecap:round;vector-effect:non-scaling-stroke}.station-docked rect{fill:#22a06b;stroke:#0d5037}.station-docked path{stroke:#e2fff1}.station-docking rect{fill:#d98b22;stroke:#70420a}.station-docking path{stroke:#fff1cd}.station-undocked rect{fill:#75818a;stroke:#29333a}.station-undocked path{stroke:#f4f7f8}.station-unknown rect{fill:#17877d;stroke:#073f3a}.station-unknown path{stroke:#d9fffa}.mower circle:first-child{fill:#39d98a;stroke:#0b3b29;stroke-width:%1$s;vector-effect:non-scaling-stroke}.mower circle:last-child{fill:#0b3b29}.zone-label{font-family:system-ui,sans-serif;font-size:%3$spx;text-anchor:middle;dominant-baseline:middle;fill:%9$s;paint-order:stroke;stroke:%10$s;stroke-width:.35;stroke-linejoin:round;letter-spacing:0}.legend{pointer-events:none}.legend-background{fill:%11$s;fill-opacity:.9;stroke:%12$s;stroke-width:%1$s;vector-effect:non-scaling-stroke}.legend-label{font-family:system-ui,sans-serif;font-size:%13$spx;dominant-baseline:middle;fill:%14$s;letter-spacing:0}.legend-station rect{stroke-width:%1$s;vector-effect:non-scaling-stroke}.legend-station path{fill:none;stroke-width:%1$s;stroke-linecap:round;vector-effect:non-scaling-stroke}.legend-station-docked rect{fill:#22a06b;stroke:#0d5037}.legend-station-docked path{stroke:#e2fff1}.legend-station-docking rect{fill:#d98b22;stroke:#70420a}.legend-station-docking path{stroke:#fff1cd}.legend-station-undocked rect{fill:#75818a;stroke:#29333a}.legend-station-undocked path{stroke:#f4f7f8}.legend-station-unknown rect{fill:#17877d;stroke:#073f3a}.legend-station-unknown path{stroke:#d9fffa}.legend-mower circle:first-child{fill:#39d98a;stroke:#0b3b29;stroke-width:%1$s;vector-effect:non-scaling-stroke}.legend-mower circle:last-child{fill:#0b3b29}.legend-path{stroke:%7$s;stroke-width:%2$s;stroke-linecap:round;vector-effect:non-scaling-stroke}.legend-obstacle{fill:%5$s;fill-opacity:.08;stroke:%6$s;stroke-width:%1$s;stroke-dasharray:1.1 .8;vector-effect:non-scaling-stroke}.legend-points circle{stroke:%8$s;stroke-width:%1$s;vector-effect:non-scaling-stroke}.legend-point-outside{fill:#ff9f43}.legend-point-ambiguous{fill:#ef6461}.legend-point-unknown{fill:#a78bfa}',
             self::number($stroke),
             self::number($path),
             self::number($font),
@@ -435,7 +506,11 @@ final class LocalMapSvgRenderer
             $palette['path'],
             $palette['pointStroke'],
             $palette['label'],
-            $palette['labelStroke']
+            $palette['labelStroke'],
+            $palette['legendBackground'],
+            $palette['legendBorder'],
+            self::number(max(1.35, min(1.9, $span / 58.0))),
+            $palette['legendText']
         );
     }
 
