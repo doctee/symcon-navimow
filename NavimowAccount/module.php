@@ -6376,10 +6376,19 @@ class NavimowAccount extends IPSModule
         $state = is_array($root['state'] ?? null)
             ? $root['state']
             : Navimow\MqttPositionDiagnostic::initialState();
+        $pilot = $this->decodeMqttAttribute(
+            'MqttPilotObservationRegistry',
+            []
+        );
+        $sessionSequence = is_int($pilot['sessionSequence'] ?? null)
+            && $pilot['sessionSequence'] >= 0
+                ? $pilot['sessionSequence']
+                : 0;
         $root['state'] = Navimow\MqttPositionDiagnostic::reduce(
             $state,
             $pose,
-            $receivedAt
+            $receivedAt,
+            $sessionSequence
         );
         $this->WriteAttributeString(
             'MqttPositionDiagnostic',

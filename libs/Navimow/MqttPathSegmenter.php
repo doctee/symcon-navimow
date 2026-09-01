@@ -201,18 +201,23 @@ final class MqttPathSegmenter
         if (!is_array($point)) {
             throw new InvalidArgumentException('Position point is invalid.');
         }
+        $sessionSequence = $point['sessionSequence'] ?? 0;
         foreach (['localX', 'localY', 'orientation'] as $field) {
             if (!self::finiteNumber($point[$field] ?? null)) {
                 throw new InvalidArgumentException('Position value is invalid.');
             }
         }
         foreach (
-            ['sourceTimestamp', 'receivedAt', 'vehicleStateCode',
-                'sessionSequence'] as $field
+            ['sourceTimestamp', 'receivedAt', 'vehicleStateCode'] as $field
         ) {
             if (!is_int($point[$field] ?? null) || $point[$field] < 0) {
                 throw new InvalidArgumentException('Position time is invalid.');
             }
+        }
+        if (!is_int($sessionSequence) || $sessionSequence < 0) {
+            throw new InvalidArgumentException(
+                'Position session sequence is invalid.'
+            );
         }
         if ($point['sourceTimestamp'] <= 0 || $point['receivedAt'] <= 0) {
             throw new InvalidArgumentException('Position time is invalid.');
@@ -225,7 +230,7 @@ final class MqttPathSegmenter
             'sourceTimestamp' => $point['sourceTimestamp'],
             'receivedAt' => $point['receivedAt'],
             'vehicleStateCode' => $point['vehicleStateCode'],
-            'sessionSequence' => $point['sessionSequence'],
+            'sessionSequence' => $sessionSequence,
         ];
     }
 

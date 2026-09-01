@@ -40,15 +40,22 @@ final class MqttPositionDiagnostic
     public static function reduce(
         array $previous,
         array $pose,
-        int $receivedAt
+        int $receivedAt,
+        int $sessionSequence = 0
     ): array {
         self::assertState($previous);
+        if ($sessionSequence < 0) {
+            throw new MqttPayloadException(
+                'MQTT position session sequence is invalid.'
+            );
+        }
         $validated = self::validatedPose($pose, $receivedAt);
 
         $next = $previous;
         $next['sampleSequence']++;
         $sample = $validated + [
             'sampleSequence' => $next['sampleSequence'],
+            'sessionSequence' => $sessionSequence,
         ];
 
         $lastSourceTimestamp = $previous['lastSourceTimestamp'];
@@ -361,7 +368,7 @@ final class MqttPositionDiagnostic
     private static function assertSample(array $sample): void
     {
         if (
-            count($sample) !== 7
+            !in_array(count($sample), [7, 8], true)
             || !self::boundedNumber(
                 $sample['localX'] ?? null,
                 self::MAX_ABSOLUTE_LOCAL_COORDINATE
@@ -382,6 +389,13 @@ final class MqttPositionDiagnostic
             || $sample['vehicleStateCode'] < 0
             || !is_int($sample['sampleSequence'] ?? null)
             || $sample['sampleSequence'] <= 0
+            || (
+                array_key_exists('sessionSequence', $sample)
+                && (
+                    !is_int($sample['sessionSequence'])
+                    || $sample['sessionSequence'] < 0
+                )
+            )
         ) {
             throw new MqttPayloadException(
                 'MQTT position diagnostic sample is malformed.'
