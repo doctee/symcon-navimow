@@ -25,8 +25,8 @@
         {
             "source": "case-studies/navimow/distribution/NavimowAccount/module.php",
             "target": "NavimowAccount/module.php",
-            "sha256": "19e4e500ac4e660dd3cb16ce621cdc894e8524e66db6b84b40703393be8981ce",
-            "bytes": 259550
+            "sha256": "26e910157a45de3b904e9fb72755c97a0d50a6161710b8d49ed0eeca1594bbd7",
+            "bytes": 259875
         },
         {
             "source": "case-studies/navimow/distribution/NavimowConfigurator/form.json",
@@ -163,8 +163,8 @@
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/MqttPathSegmenter.php",
             "target": "libs/Navimow/MqttPathSegmenter.php",
-            "sha256": "c2f8ae2629cca51689df97a9f1027c1131cd6a8c9d28b0c2a54ab588a8e020b5",
-            "bytes": 12306
+            "sha256": "4eb43d95389eee979e43ced04a0ecce6d6cf505574354bf28721191f0aa4cc60",
+            "bytes": 12515
         },
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/MqttPayloadException.php",
@@ -181,8 +181,8 @@
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/MqttPositionDiagnostic.php",
             "target": "libs/Navimow/MqttPositionDiagnostic.php",
-            "sha256": "733ad081c2d237ac6268657e97f3822ab0eae640ed94711af6780a593ddd6728",
-            "bytes": 15159
+            "sha256": "a2bf3ab5f2406dac050650dcdf7519da422887608fb64fce6c254a986d984f24",
+            "bytes": 15670
         },
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/MqttTaskObservationLedger.php",
@@ -233,7 +233,7 @@
             "bytes": 3780
         }
     ],
-    "filesetSha256": "e711fa5220d81a915478c38833184e943cd6e5fd8afa7e71d08c6d0d52f23d4c",
+    "filesetSha256": "4f73a968a261f38cfb53fb885771a7ec8c6c94adcab6603dd7c177d950cbc8ad",
     "builderVersion": "1.0.0",
     "license": {
         "identifier": "PolyForm-Noncommercial-1.0.0",
