@@ -767,7 +767,7 @@ final class LocalMapSceneProjector
         $minimumY = min($ys);
         $maximumY = max($ys);
         $span = max($maximumX - $minimumX, $maximumY - $minimumY);
-        $padding = max(1.0, $span * 0.05);
+        $padding = max(0.75, $span * 0.03);
 
         return [
             'minimumX' => $minimumX - $padding,

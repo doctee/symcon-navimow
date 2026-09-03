@@ -121,14 +121,14 @@
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/LocalMapSceneProjector.php",
             "target": "libs/Navimow/LocalMapSceneProjector.php",
-            "sha256": "8fd9f9974ab2d52344cf7f41e71e48a0ffe7a5d73c30910c82a3ab3e079a542d",
-            "bytes": 32574
+            "sha256": "fd2bafee12c6ac8bdea34b7b86313179e14dd2cd4da89e0ff3fbd0b16fab1e87",
+            "bytes": 32575
         },
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/LocalMapSvgRenderer.php",
             "target": "libs/Navimow/LocalMapSvgRenderer.php",
-            "sha256": "82e5bfd57791e03dc1d933e2d7728fd8cb53e116d8f6900bbfa7bddd6641e8b3",
-            "bytes": 30118
+            "sha256": "8d69ab3a9b5c10f398ba47e7c76c783449890cee619915fed2c757cf7df44bc5",
+            "bytes": 34617
         },
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/MapGeometryReducer.php",
@@ -233,7 +233,7 @@
             "bytes": 3780
         }
     ],
-    "filesetSha256": "4f73a968a261f38cfb53fb885771a7ec8c6c94adcab6603dd7c177d950cbc8ad",
+    "filesetSha256": "84290154e0600439e52e04c21809f00428d0e242bbd72c731a0d5d6bfddb48f8",
     "builderVersion": "1.0.0",
     "license": {
         "identifier": "PolyForm-Noncommercial-1.0.0",
