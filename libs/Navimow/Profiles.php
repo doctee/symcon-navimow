@@ -75,6 +75,26 @@ final class Profiles
             3 => 'High',
         ]);
 
+        self::ensureIntegerProfile('NAVIMOW.MqttOperatingState', [
+            0 => 'Disabled',
+            1 => 'Starting',
+            2 => 'Active',
+            3 => 'Degraded',
+            4 => 'Circuit Open',
+            5 => 'Suspended',
+            6 => 'Waiting for Authentication',
+            7 => 'Reauthentication Required',
+            8 => 'Configuration Error',
+            9 => 'Stopping',
+        ]);
+
+        self::ensureIntegerProfile('NAVIMOW.MqttPositionFreshness', [
+            0 => 'Unavailable',
+            1 => 'Fresh',
+            2 => 'Delayed',
+            3 => 'Stale',
+        ]);
+
         self::ensureFloatProfile('NAVIMOW.Percentage', ' %', 1);
         self::ensureFloatProfile('NAVIMOW.Area', ' m²', 1);
     }
