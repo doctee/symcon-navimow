@@ -7,6 +7,7 @@ require_once __DIR__ . '/../libs/Navimow/CommandContract.php';
 require_once __DIR__ . '/../libs/Navimow/MqttEnvelopeException.php';
 require_once __DIR__ . '/../libs/Navimow/MqttEnvelopeParser.php';
 require_once __DIR__ . '/../libs/Navimow/MqttCredentialMapper.php';
+require_once __DIR__ . '/../libs/Navimow/MqttContinuousOperationReducer.php';
 require_once __DIR__ . '/../libs/Navimow/MqttPartialStateAccumulator.php';
 require_once __DIR__ . '/../libs/Navimow/MqttPayloadException.php';
 require_once __DIR__ . '/../libs/Navimow/MqttPayloadParser.php';
@@ -16,6 +17,15 @@ require_once __DIR__ . '/../libs/Navimow/MqttTransportConfiguration.php';
 require_once __DIR__ . '/../libs/Navimow/OAuthHelper.php';
 require_once __DIR__ . '/../libs/Navimow/PayloadMapper.php';
 require_once __DIR__ . '/../libs/Navimow/Profiles.php';
+$configurationHashHelper = __DIR__
+    . '/../libs/SAEF/helpers/diagnostics/ConfigurationHash.php';
+if (
+    !function_exists('SAEF_CreateConfigurationHash')
+    && is_file($configurationHashHelper)
+) {
+    require_once $configurationHashHelper;
+}
+unset($configurationHashHelper);
 
 class NavimowAccount extends IPSModule
 {
@@ -56,7 +66,6 @@ class NavimowAccount extends IPSModule
     private const MQTT_MAX_DIAGNOSTIC_COUNTER = 2147483647;
     private const MQTT_DIAGNOSTIC_ATTRIBUTE_MAX_BYTES = 262144;
     private const LOCAL_MAP_EVIDENCE_MAX_BYTES = 262144;
-    private const LOCAL_MAP_POSITION_STALE_SECONDS = 300;
     private const MQTT_PILOT_CHECKPOINT_SECONDS = 18000;
     private const MQTT_PILOT_MIN_DURATION_SECONDS = 300;
     private const MQTT_PILOT_MAX_DURATION_SECONDS = 259200;
@@ -87,6 +96,12 @@ class NavimowAccount extends IPSModule
         'ReauthenticationRequired';
     private const MQTT_LIFECYCLE_CONFIGURATION_ERROR =
         'ConfigurationError';
+    private const MQTT_MODE_BOUNDED_PILOT = 1;
+    private const MQTT_MODE_CONTINUOUS_RECEIVE_ONLY = 2;
+    private const MQTT_CONTINUOUS_MINIMUM_TOKEN_HORIZON_SECONDS = 1200;
+    private const MQTT_CONTINUOUS_MAXIMUM_REST_AGE_SECONDS = 900;
+    private const MQTT_POSITION_FRESH_SECONDS = 120;
+    private const MQTT_POSITION_DELAYED_SECONDS = 600;
 
     private const VEHICLE_STATE_RUNNING = 1;
     private const VEHICLE_STATE_DOCKED = 2;
@@ -122,6 +137,10 @@ class NavimowAccount extends IPSModule
         $this->RegisterPropertyBoolean('DebugPayloads', false);
         $this->RegisterPropertyBoolean('EnableMqttShadow', false);
         $this->RegisterPropertyInteger(
+            'MqttOperatingMode',
+            self::MQTT_MODE_BOUNDED_PILOT
+        );
+        $this->RegisterPropertyInteger(
             'MqttPilotMaximumDurationSeconds',
             self::MQTT_PILOT_MAX_DURATION_SECONDS
         );
@@ -150,6 +169,10 @@ class NavimowAccount extends IPSModule
         $this->RegisterAttributeString('MqttPendingReconciliation', '{}');
         $this->RegisterAttributeString(
             'MqttPilotObservationRegistry',
+            '{}'
+        );
+        $this->RegisterAttributeString(
+            'MqttContinuousOperationRegistry',
             '{}'
         );
         $this->registerKernelStartMessage();
@@ -189,6 +212,21 @@ class NavimowAccount extends IPSModule
             0,
             'NAVAC_ProcessMqttPilotClosure($_IPS["TARGET"]);'
         );
+        $this->RegisterTimer(
+            'MqttContinuousLease',
+            0,
+            'NAVAC_ProcessMqttContinuousLease($_IPS["TARGET"]);'
+        );
+        $this->RegisterTimer(
+            'MqttContinuousRecovery',
+            0,
+            'NAVAC_ProcessMqttContinuousRecovery($_IPS["TARGET"]);'
+        );
+        $this->RegisterTimer(
+            'MqttContinuousClosure',
+            0,
+            'NAVAC_ProcessMqttContinuousClosure($_IPS["TARGET"]);'
+        );
     }
 
     public function ApplyChanges()
@@ -203,20 +241,59 @@ class NavimowAccount extends IPSModule
         $this->RegisterVariableInteger('LastDiscovery', 'Last Discovery', '~UnixTimestamp', 40);
         $this->RegisterVariableInteger('LastRestSuccess', 'Last REST Success', '~UnixTimestamp', 50);
         $this->RegisterVariableInteger('RestErrorCount', 'REST Error Count', '', 60);
+        $this->RegisterVariableInteger(
+            'MqttOperatingState',
+            'MQTT Operating State',
+            'NAVIMOW.MqttOperatingState',
+            70
+        );
+        $this->RegisterVariableInteger(
+            'MqttLastMessageAt',
+            'MQTT Last Message At',
+            '~UnixTimestamp',
+            80
+        );
+        $this->RegisterVariableInteger(
+            'MqttLastPositionAt',
+            'MQTT Last Position At',
+            '~UnixTimestamp',
+            90
+        );
+        $this->RegisterVariableInteger(
+            'MqttPositionFreshness',
+            'MQTT Position Freshness',
+            'NAVIMOW.MqttPositionFreshness',
+            100
+        );
+        $this->RegisterVariableInteger(
+            'MqttLeaseExpiresAt',
+            'MQTT Lease Expires At',
+            '~UnixTimestamp',
+            110
+        );
 
         $kernelReconciliationRequired =
             $this->mqttKernelReconciliationMustTakePrecedence();
         $this->clearMqttEphemeralState();
         $this->SetTimerInterval('MqttReconcile', 0);
         $this->SetTimerInterval('MqttLifecycle', 0);
+        $this->SetTimerInterval('MqttContinuousLease', 0);
+        $this->SetTimerInterval('MqttContinuousRecovery', 0);
+        $this->SetTimerInterval('MqttContinuousClosure', 0);
         $closurePending = $this->reconcileMqttPilotAutomaticClosure();
         $this->reconcileMqttPilotObservation();
+        $continuousClosurePending =
+            $this->reconcileMqttContinuousOperation();
+        $closurePending = $closurePending || $continuousClosurePending;
         if (!$kernelReconciliationRequired && !$closurePending) {
             if (!$this->ReadPropertyBoolean('EnableMqttShadow')) {
                 $this->disconnectOwnedMqttTransportSafely();
             } elseif (
                 $this->ReadAttributeString('MqttOwnershipRegistry')
                     !== '{}'
+                && !$this->mqttContinuousStateOwnsSession(
+                    $this->mqttContinuousRegistry()['state'] ?? null
+                )
             ) {
                 $this->disconnectOwnedMqttTransportSafely();
             }
@@ -232,6 +309,7 @@ class NavimowAccount extends IPSModule
                 $this->continueMqttKernelReconciliation();
             }
             $this->SetStatus(self::INSTANCE_STATUS_ACTIVE);
+            $this->updateMqttOperatingVariables();
             return;
         }
 
@@ -244,6 +322,7 @@ class NavimowAccount extends IPSModule
                 $this->continueMqttKernelReconciliation();
             }
             $this->SetStatus(self::INSTANCE_STATUS_ACTIVE);
+            $this->updateMqttOperatingVariables();
             return;
         }
 
@@ -257,14 +336,17 @@ class NavimowAccount extends IPSModule
         if ($kernelReconciliationRequired) {
             $this->continueMqttKernelReconciliation();
             $this->SetStatus(self::INSTANCE_STATUS_ACTIVE);
+            $this->updateMqttOperatingVariables();
             return;
         }
         if ($closurePending) {
+            $this->updateMqttOperatingVariables();
             $this->SetStatus(self::INSTANCE_STATUS_ACTIVE);
             return;
         }
         $this->markCurrentKernelEpochReconciled();
         $this->scheduleMqttStartupIfReady();
+        $this->updateMqttOperatingVariables();
         $this->SetStatus(self::INSTANCE_STATUS_ACTIVE);
     }
 
@@ -583,15 +665,17 @@ class NavimowAccount extends IPSModule
             'MqttPendingReconciliation'
         );
         $validation = $this->inspectMqttShadowConfiguration();
+        $operation = $this->mqttContinuousDiagnosticProjection();
 
         return $this->encodeResult([
-            'formatVersion' => 2,
+            'formatVersion' => 3,
             'featureEnabled' =>
                 $this->ReadPropertyBoolean('EnableMqttShadow'),
             'configurationStatus' => $this->mqttDiagnosticCode(
                 $validation['status'] ?? null,
                 ['disabled', 'ready', 'configuration-invalid']
             ),
+            'operation' => $operation,
             'lifecycle' => [
                 'state' => $this->mqttDiagnosticCode(
                     $lifecycle['state'] ?? null,
@@ -770,6 +854,7 @@ class NavimowAccount extends IPSModule
                         'kernel-fallback',
                         'reconnect',
                         'rotation',
+                        'half-open',
                     ]
                 ),
                 'lastConnectionTriggerAt' =>
@@ -798,6 +883,40 @@ class NavimowAccount extends IPSModule
                 'lastComparisonResult' => $this->mqttDiagnosticCode(
                     $statistics['lastComparisonResult'] ?? null,
                     ['match', 'mismatch', 'stale']
+                ),
+                'continuousStarts' => $this->mqttDiagnosticInteger(
+                    $statistics['continuousStarts'] ?? null
+                ),
+                'continuousLeaseRenewals' =>
+                    $this->mqttDiagnosticInteger(
+                        $statistics['continuousLeaseRenewals'] ?? null
+                    ),
+                'continuousLeaseExpirations' =>
+                    $this->mqttDiagnosticInteger(
+                        $statistics['continuousLeaseExpirations'] ?? null
+                    ),
+                'continuousCircuitOpenings' =>
+                    $this->mqttDiagnosticInteger(
+                        $statistics['continuousCircuitOpenings'] ?? null
+                    ),
+                'continuousHalfOpenProbes' =>
+                    $this->mqttDiagnosticInteger(
+                        $statistics['continuousHalfOpenProbes'] ?? null
+                    ),
+                'continuousHalfOpenRecoveries' =>
+                    $this->mqttDiagnosticInteger(
+                        $statistics['continuousHalfOpenRecoveries'] ?? null
+                    ),
+                'continuousHalfOpenFailures' =>
+                    $this->mqttDiagnosticInteger(
+                        $statistics['continuousHalfOpenFailures'] ?? null
+                    ),
+                'continuousSuspensions' =>
+                    $this->mqttDiagnosticInteger(
+                        $statistics['continuousSuspensions'] ?? null
+                    ),
+                'continuousStops' => $this->mqttDiagnosticInteger(
+                    $statistics['continuousStops'] ?? null
                 ),
             ],
             'errors' => $errors,
@@ -914,6 +1033,262 @@ class NavimowAccount extends IPSModule
         }
     }
 
+    public function ResumeMqttContinuousOperation(): string
+    {
+        return $this->withMqttLifecycleLock(function (): string {
+            if (
+                $this->effectiveMqttOperatingMode()
+                !== 'ContinuousReceiveOnly'
+            ) {
+                return 'Continuous MQTT mode is not enabled.';
+            }
+            try {
+                $registry = $this->mqttContinuousRegistry();
+            } catch (Throwable) {
+                return 'Continuous MQTT registry is invalid.';
+            }
+            if (($registry['state'] ?? null) !== 'Suspended') {
+                return 'Continuous MQTT operation is not suspended.';
+            }
+            if (!$this->continuousStartPrerequisitesAreReady()) {
+                return 'Continuous MQTT prerequisites are not ready.';
+            }
+
+            $this->startMqttContinuousOperation($registry);
+            return 'Continuous MQTT connection attempt scheduled.';
+        });
+    }
+
+    public function ProcessMqttContinuousLease(): void
+    {
+        $this->SetTimerInterval('MqttContinuousLease', 0);
+        $result = $this->withMqttLifecycleLock(function (): string {
+            if (
+                $this->effectiveMqttOperatingMode()
+                !== 'ContinuousReceiveOnly'
+            ) {
+                return 'inactive';
+            }
+            try {
+                $registry = $this->mqttContinuousRegistry();
+                $decision = Navimow\MqttContinuousOperationReducer::
+                    leaseDecision(
+                        $registry,
+                        $this->currentTimestamp(),
+                        $this->continuousLeaseRenewalIsEligible(
+                            $registry
+                        )
+                    );
+                $this->writeMqttContinuousRegistry(
+                    $decision['registry']
+                );
+                if ($decision['effect'] === 'renew-lease') {
+                    $this->recordMqttStatistic(
+                        'continuousLeaseRenewals'
+                    );
+                } elseif ($decision['effect'] === 'clear-credentials') {
+                    $this->recordMqttStatistic(
+                        'continuousLeaseExpirations'
+                    );
+                    $this->scheduleMqttContinuousClosure();
+                    return 'closure';
+                }
+                $this->scheduleMqttContinuousLease(
+                    $decision['registry']
+                );
+                $this->updateMqttOperatingVariables();
+                return 'processed';
+            } catch (Throwable) {
+                $this->requestMqttContinuousStop(
+                    'registry-invalid'
+                );
+                return 'closure';
+            }
+        });
+        if (!in_array($result, ['inactive', 'processed', 'closure'], true)) {
+            $this->SetTimerInterval('MqttContinuousLease', 5000);
+        }
+    }
+
+    public function ProcessMqttContinuousRecovery(): void
+    {
+        $this->SetTimerInterval('MqttContinuousRecovery', 0);
+        $result = $this->withMqttLifecycleLock(function (): string {
+            if (
+                $this->effectiveMqttOperatingMode()
+                !== 'ContinuousReceiveOnly'
+            ) {
+                return 'inactive';
+            }
+            try {
+                $registry = $this->mqttContinuousRegistry();
+                $now = $this->currentTimestamp();
+                if (($registry['state'] ?? null) === 'CircuitOpen') {
+                    $decision = Navimow\MqttContinuousOperationReducer::
+                        halfOpenDecision(
+                            $registry,
+                            $now,
+                            $this->continuousRecoveryPrerequisitesAreReady(
+                                $registry
+                            )
+                        );
+                    $this->writeMqttContinuousRegistry(
+                        $decision['registry']
+                    );
+                    if ($decision['effect'] === 'start-half-open') {
+                        $this->recordMqttStatistic(
+                            'continuousHalfOpenProbes'
+                        );
+                        $this->updateMqttOperatingVariables();
+                        $this->connectMqttShadowLocked('half-open');
+                        return 'probe';
+                    }
+                    if ($decision['effect'] === 'clear-credentials') {
+                        $this->scheduleMqttContinuousClosure();
+                        return 'closure';
+                    }
+                    $this->scheduleMqttContinuousRecovery(
+                        $decision['registry']
+                    );
+                    return 'scheduled';
+                }
+                if (($registry['state'] ?? null) === 'HalfOpen') {
+                    $healthy = $this->mqttContinuousTransportIsHealthy(
+                        $this->mqttTopology()
+                    );
+                    if ($healthy) {
+                        $this->observeMqttContinuousHealth(true);
+                    } elseif ($now >= ($registry['probeDeadlineAt'] ?? 0)) {
+                        $this->failMqttContinuousProbe(
+                            'probe-timeout'
+                        );
+                    } else {
+                        $this->scheduleMqttContinuousRecovery($registry);
+                    }
+                    return 'scheduled';
+                }
+                if (
+                    ($registry['state'] ?? null)
+                    === 'RecoveryConfirming'
+                ) {
+                    $this->observeMqttContinuousHealth(
+                        $this->mqttContinuousTransportIsHealthy(
+                            $this->mqttTopology()
+                        )
+                    );
+                    return 'scheduled';
+                }
+                return 'inactive';
+            } catch (Throwable) {
+                $this->requestMqttContinuousStop(
+                    'registry-invalid'
+                );
+                return 'closure';
+            }
+        });
+        if (
+            !in_array(
+                $result,
+                ['inactive', 'probe', 'scheduled', 'closure'],
+                true
+            )
+        ) {
+            $this->SetTimerInterval('MqttContinuousRecovery', 5000);
+        }
+    }
+
+    public function ProcessMqttContinuousClosure(): void
+    {
+        $this->SetTimerInterval('MqttContinuousClosure', 0);
+        $result = $this->withMqttLifecycleLock(function (): string {
+            try {
+                $registry = $this->mqttContinuousRegistry();
+            } catch (Throwable) {
+                $registry = Navimow\MqttContinuousOperationReducer::
+                    initialState();
+                $decision = Navimow\MqttContinuousOperationReducer::
+                    requestStop(
+                        $registry,
+                        $this->currentTimestamp(),
+                        'registry-invalid'
+                    );
+                $registry = $decision['registry'];
+                $this->writeMqttContinuousRegistry($registry);
+            }
+            if (($registry['state'] ?? null) === 'Stopping') {
+                try {
+                    if (
+                        $this->ReadAttributeString(
+                            'MqttOwnershipRegistry'
+                        ) !== '{}'
+                    ) {
+                        $this->disconnectOwnedMqttTransport();
+                        if (
+                            !$this->mqttTransportIsCredentialFree(
+                                $this->mqttTopology()
+                            )
+                        ) {
+                            throw new RuntimeException(
+                                'MQTT credentials remain after cleanup.'
+                            );
+                        }
+                    }
+                    $decision = Navimow\MqttContinuousOperationReducer::
+                        credentialsCleared(
+                            $registry,
+                            $this->currentTimestamp()
+                        );
+                    $registry = $decision['registry'];
+                    $this->writeMqttContinuousRegistry($registry);
+                } catch (Throwable) {
+                    $this->appendMqttError(
+                        'continuous-credential-cleanup-failed'
+                    );
+                    return 'retry';
+                }
+            }
+            if (($registry['state'] ?? null) !== 'CredentialsCleared') {
+                return 'idle';
+            }
+            if (
+                $this->continuousStopForcesDisabledMaster($registry)
+                && $this->ReadPropertyBoolean('EnableMqttShadow')
+            ) {
+                return 'disable-property';
+            }
+            $decision = Navimow\MqttContinuousOperationReducer::stopped(
+                $registry,
+                $this->currentTimestamp()
+            );
+            $this->writeMqttContinuousRegistry($decision['registry']);
+            $this->recordMqttStatistic(
+                ($decision['registry']['state'] ?? null) === 'Suspended'
+                    ? 'continuousSuspensions'
+                    : 'continuousStops'
+            );
+            $this->updateMqttOperatingVariables();
+            return 'closed';
+        });
+        if ($result === 'disable-property') {
+            try {
+                $this->setOwnProperty('EnableMqttShadow', false);
+                $this->setOwnProperty(
+                    'EnableMqttPositionDiagnostics',
+                    false
+                );
+                $this->applyOwnChanges();
+            } catch (Throwable) {
+                $this->SetTimerInterval('MqttContinuousClosure', 60000);
+                return;
+            }
+            $this->SetTimerInterval('MqttContinuousClosure', 1000);
+        } elseif ($result === 'retry') {
+            $this->SetTimerInterval('MqttContinuousClosure', 60000);
+        } elseif (!in_array($result, ['idle', 'closed'], true)) {
+            $this->SetTimerInterval('MqttContinuousClosure', 5000);
+        }
+    }
+
     public function GetMqttTaskObservationDiagnostics(): string
     {
         try {
@@ -1025,10 +1400,13 @@ class NavimowAccount extends IPSModule
             $task = Navimow\MqttTaskObservationLedger::project($ledger);
             $age = $position['latest']['ageSeconds'] ?? null;
             $result = array_replace($base, [
-                'status' => is_int($age)
-                    && $age <= self::LOCAL_MAP_POSITION_STALE_SECONDS
-                        ? 'ok'
-                        : 'stale',
+                'status' => match (true) {
+                    !is_int($age) => 'unavailable',
+                    $age <= self::MQTT_POSITION_FRESH_SECONDS => 'ok',
+                    $age <= self::MQTT_POSITION_DELAYED_SECONDS =>
+                        'delayed',
+                    default => 'stale',
+                },
                 'position' => $position,
                 'task' => $task,
             ]);
@@ -1149,6 +1527,12 @@ class NavimowAccount extends IPSModule
 
     public function ConnectMqttShadow(): string
     {
+        if ($this->effectiveMqttOperatingMode() !== 'BoundedPilot') {
+            return $this->effectiveMqttOperatingMode()
+                === 'ContinuousReceiveOnly'
+                    ? 'Use Resume Continuous MQTT in continuous mode.'
+                    : 'Bounded MQTT pilot mode is not enabled.';
+        }
         return $this->withMqttLifecycleLock(
             fn (): string => $this->connectMqttShadowLocked('manual')
         );
@@ -1186,7 +1570,9 @@ class NavimowAccount extends IPSModule
         ) {
             $this->clearMqttKernelCoreObservationHistory();
         }
-        $this->startMqttPilotObservationIfNeeded();
+        if ($this->effectiveMqttOperatingMode() === 'BoundedPilot') {
+            $this->startMqttPilotObservationIfNeeded();
+        }
 
         $topology = $this->mqttTopology();
         $identity = $this->ReadAttributeString('MqttClientIdentity');
@@ -1303,7 +1689,13 @@ class NavimowAccount extends IPSModule
             $this->appendMqttError('connection-failed');
             $this->recordMqttStatistic('connectionFailures');
             $this->markMqttConnectionNotPending();
-            $this->handleMqttConnectionFailure($exception);
+            if ($connectionTrigger === 'half-open') {
+                $this->failMqttContinuousProbe(
+                    'probe-connection-failed'
+                );
+            } else {
+                $this->handleMqttConnectionFailure($exception);
+            }
             return 'MQTT connection attempt failed.';
         }
     }
@@ -1316,6 +1708,16 @@ class NavimowAccount extends IPSModule
             }
             if (!($this->inspectMqttShadowConfiguration()['valid'] ?? false)) {
                 return 'MQTT ownership validation failed.';
+            }
+
+            if (
+                $this->effectiveMqttOperatingMode()
+                === 'ContinuousReceiveOnly'
+            ) {
+                $this->requestMqttContinuousStop(
+                    'operator-suspended'
+                );
+                return 'Continuous MQTT suspension scheduled.';
             }
 
             try {
@@ -1346,6 +1748,7 @@ class NavimowAccount extends IPSModule
             $this->processMqttLifecycleLocked();
             return 'processed';
         });
+        $this->updateMqttOperatingVariables();
         if ($result !== 'processed') {
             $this->SetTimerInterval('MqttLifecycle', 5000);
         }
@@ -1409,11 +1812,50 @@ class NavimowAccount extends IPSModule
         $this->writeMqttLifecycle($lifecycle);
 
         if (
+            $this->effectiveMqttOperatingMode()
+            === 'ContinuousReceiveOnly'
+        ) {
+            try {
+                $continuousState =
+                    $this->mqttContinuousRegistry()['state'] ?? null;
+                if (
+                    $continuousState === 'RecoveryConfirming'
+                    && !(
+                        $mqttStatus === 102
+                        && $webSocketStatus === 102
+                        && $webSocketActive
+                    )
+                ) {
+                    $this->failMqttContinuousProbe(
+                        'recovery-unhealthy'
+                    );
+                    return;
+                }
+                if (
+                    $continuousState === 'HalfOpen'
+                    && !(
+                        $mqttStatus === 102
+                        && $webSocketStatus === 102
+                        && $webSocketActive
+                    )
+                ) {
+                    $this->scheduleMqttObservation();
+                    return;
+                }
+            } catch (Throwable) {
+                $this->requestMqttContinuousStop('registry-invalid');
+                return;
+            }
+        }
+
+        if (
             $mqttStatus === 102
             && $webSocketStatus === 102
             && $webSocketActive
         ) {
             $this->recordMqttHealthyObservation($now);
+            $this->observeMqttContinuousHealth(true);
+            $this->updateMqttOperatingVariables();
             if ($this->mqttCredentialRotationIsPending()) {
                 $this->performMqttCredentialRotation();
                 return;
@@ -1547,6 +1989,7 @@ class NavimowAccount extends IPSModule
                 );
             }
             $this->recordMqttResult($result, false);
+            $this->updateMqttOperatingVariables();
 
             return $result;
         } catch (
@@ -2571,6 +3014,728 @@ class NavimowAccount extends IPSModule
         }
     }
 
+    private function effectiveMqttOperatingMode(): string
+    {
+        if (!$this->ReadPropertyBoolean('EnableMqttShadow')) {
+            return 'Disabled';
+        }
+
+        return match ($this->ReadPropertyInteger('MqttOperatingMode')) {
+            self::MQTT_MODE_BOUNDED_PILOT => 'BoundedPilot',
+            self::MQTT_MODE_CONTINUOUS_RECEIVE_ONLY =>
+                'ContinuousReceiveOnly',
+            default => 'ConfigurationError',
+        };
+    }
+
+    /** @return array<string, int|string> */
+    private function mqttContinuousRegistry(): array
+    {
+        return Navimow\MqttContinuousOperationReducer::restore(
+            $this->ReadAttributeString(
+                'MqttContinuousOperationRegistry'
+            )
+        );
+    }
+
+    /** @param array<string, mixed> $registry */
+    private function writeMqttContinuousRegistry(array $registry): void
+    {
+        $this->WriteAttributeString(
+            'MqttContinuousOperationRegistry',
+            Navimow\MqttContinuousOperationReducer::serialize($registry)
+        );
+    }
+
+    private function reconcileMqttContinuousOperation(): bool
+    {
+        $mode = $this->effectiveMqttOperatingMode();
+        try {
+            $registry = $this->mqttContinuousRegistry();
+        } catch (Throwable) {
+            $initial = Navimow\MqttContinuousOperationReducer::
+                initialState();
+            $decision = Navimow\MqttContinuousOperationReducer::requestStop(
+                $initial,
+                $this->currentTimestamp(),
+                'registry-invalid'
+            );
+            $this->writeMqttContinuousRegistry($decision['registry']);
+            $this->setMqttLifecycleState(
+                self::MQTT_LIFECYCLE_CONFIGURATION_ERROR
+            );
+            $this->scheduleMqttContinuousClosure();
+            return true;
+        }
+        $state = $registry['state'] ?? null;
+        if (in_array($state, ['Stopping', 'CredentialsCleared'], true)) {
+            $this->scheduleMqttContinuousClosure();
+            return true;
+        }
+        if ($mode !== 'ContinuousReceiveOnly') {
+            $this->SetTimerInterval('MqttContinuousLease', 0);
+            $this->SetTimerInterval('MqttContinuousRecovery', 0);
+            if ($mode === 'ConfigurationError') {
+                $this->requestMqttContinuousStop(
+                    'configuration-invalid'
+                );
+                return true;
+            }
+            if ($this->mqttContinuousStateOwnsSession($state)) {
+                $this->requestMqttContinuousStop(
+                    $mode === 'Disabled'
+                        ? 'operator-disabled'
+                        : 'mode-changed'
+                );
+                return true;
+            }
+            return false;
+        }
+        if ($this->mqttPilotSessionOwnsTransport()) {
+            $this->requestMqttPilotClosure(
+                'operator-disabled',
+                $this->currentTimestamp()
+            );
+            $this->scheduleMqttPilotClosureProcessing();
+            return true;
+        }
+        if ($this->mqttContinuousStateOwnsSession($state)) {
+            if (
+                ($registry['leaseExpiresAt'] ?? 0)
+                <= $this->currentTimestamp()
+            ) {
+                $this->requestMqttContinuousStop('lease-expired');
+                return true;
+            }
+            try {
+                if (
+                    !hash_equals(
+                        (string) ($registry['configurationHash'] ?? ''),
+                        $this->mqttContinuousConfigurationHash()
+                    )
+                ) {
+                    $this->requestMqttContinuousStop(
+                        'configuration-invalid'
+                    );
+                    return true;
+                }
+            } catch (Throwable) {
+                $this->requestMqttContinuousStop(
+                    'configuration-invalid'
+                );
+                return true;
+            }
+            $this->scheduleMqttContinuousLease($registry);
+            $this->scheduleMqttContinuousRecovery($registry);
+        }
+
+        return false;
+    }
+
+    private function mqttContinuousStateOwnsSession(mixed $state): bool
+    {
+        return is_string($state) && in_array(
+            $state,
+            [
+                'Starting',
+                'Active',
+                'Degraded',
+                'CircuitOpen',
+                'HalfOpen',
+                'RecoveryConfirming',
+            ],
+            true
+        );
+    }
+
+    private function mqttPilotSessionOwnsTransport(): bool
+    {
+        $registry = $this->mqttPilotRegistry();
+
+        return ($registry['active'] ?? false) === true
+            || $this->mqttPilotClosureIsPending($registry);
+    }
+
+    private function mqttContinuousConfigurationHash(): string
+    {
+        if (!function_exists('SAEF_CreateConfigurationHash')) {
+            throw new RuntimeException(
+                'Configuration hash helper is unavailable.'
+            );
+        }
+        $ownership = $this->decodeMqttAttribute(
+            'MqttOwnershipRegistry',
+            []
+        );
+
+        return SAEF_CreateConfigurationHash([
+            'formatVersion' => 1,
+            'effectiveMode' => $this->effectiveMqttOperatingMode(),
+            'positionDiagnostics' => $this->ReadPropertyBoolean(
+                'EnableMqttPositionDiagnostics'
+            ),
+            'receiverBinding' => $this->ReadPropertyInteger(
+                'MqttReceiverInstanceId'
+            ),
+            'oauth' => [
+                'baseUrl' => $this->ReadPropertyString('BaseUrl'),
+                'clientId' => $this->ReadPropertyString('ClientId'),
+                'redirectUri' => $this->ReadPropertyString('RedirectUri'),
+                'clientSecretPresent' =>
+                    trim($this->ReadPropertyString('ClientSecret')) !== '',
+            ],
+            'moduleGuids' => [
+                self::MQTT_RECEIVER_MODULE_ID,
+                self::MQTT_CLIENT_MODULE_ID,
+                self::WEB_SOCKET_CLIENT_MODULE_ID,
+            ],
+            'connectionOrder' => ['receiver', 'mqtt', 'webSocket'],
+            'accountBindingHash' => $ownership['accountBinding'] ?? '',
+            'subscriptionConfigurationHash' =>
+                $ownership['subscriptionConfigurationHash'] ?? '',
+            'clientIdentityHash' =>
+                $ownership['clientIdentityHash'] ?? '',
+        ]);
+    }
+
+    private function continuousStartPrerequisitesAreReady(): bool
+    {
+        if (
+            $this->effectiveMqttOperatingMode()
+            !== 'ContinuousReceiveOnly'
+            || $this->mqttPilotSessionOwnsTransport()
+            || $this->mqttKernelReconciliationIsPending()
+            || $this->mqttKernelReconciliationMustTakePrecedence()
+            || !$this->hasMinimumMqttTokenHorizon()
+            || (bool) $this->GetValue('ReauthRequired')
+            || (int) $this->GetValue('ConnectionState')
+                !== self::STATE_CONNECTED
+            || $this->ReadAttributeString('MqttOwnershipRegistry') === '{}'
+            || !($this->inspectMqttShadowConfiguration()['valid'] ?? false)
+        ) {
+            return false;
+        }
+        try {
+            $registry = $this->mqttContinuousRegistry();
+            if (
+                in_array(
+                    $registry['state'] ?? null,
+                    ['Stopping', 'CredentialsCleared'],
+                    true
+                )
+            ) {
+                return false;
+            }
+
+            return $this->mqttTransportIsCredentialFree(
+                $this->mqttTopology()
+            );
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    private function hasMinimumMqttTokenHorizon(): bool
+    {
+        return $this->ReadAttributeString('AccessToken') !== ''
+            && $this->ReadAttributeInteger('TokenExpiresAtInternal')
+                - $this->currentTimestamp()
+                >= self::MQTT_CONTINUOUS_MINIMUM_TOKEN_HORIZON_SECONDS;
+    }
+
+    /** @param array<string, int|string> $registry */
+    private function startMqttContinuousOperation(array $registry): void
+    {
+        $decision = Navimow\MqttContinuousOperationReducer::start(
+            $registry,
+            $this->currentTimestamp(),
+            $this->mqttContinuousConfigurationHash()
+        );
+        $this->writeMqttContinuousRegistry($decision['registry']);
+        $this->recordMqttStatistic('continuousStarts');
+        $this->SetTimerInterval('MqttPilotCheckpoint', 0);
+        $this->SetTimerInterval('MqttPilotDeadline', 0);
+        $this->scheduleMqttContinuousLease($decision['registry']);
+        $this->resetMqttReconnectEpisode();
+        $this->scheduleMqttLifecycleAttempt(
+            'initial',
+            self::MQTT_LIFECYCLE_INITIAL_DELAY_SECONDS,
+            'restart-scheduled',
+            'initial'
+        );
+        $this->updateMqttOperatingVariables();
+    }
+
+    /** @param array<string, int|string> $registry */
+    private function scheduleMqttContinuousLease(array $registry): void
+    {
+        if (
+            $this->effectiveMqttOperatingMode()
+            !== 'ContinuousReceiveOnly'
+            || !$this->mqttContinuousStateOwnsSession(
+                $registry['state'] ?? null
+            )
+        ) {
+            $this->SetTimerInterval('MqttContinuousLease', 0);
+            return;
+        }
+        $now = $this->currentTimestamp();
+        $expiry = (int) ($registry['leaseExpiresAt'] ?? 0);
+        $renewal = (int) ($registry['renewalEligibleAt'] ?? 0);
+        if ($expiry <= $now) {
+            $delay = 1;
+        } elseif ($renewal > $now) {
+            $delay = min($renewal, $expiry) - $now;
+        } else {
+            $delay = min(
+                Navimow\MqttContinuousOperationReducer::
+                    RENEWAL_RECHECK_SECONDS,
+                $expiry - $now
+            );
+        }
+        $this->SetTimerInterval(
+            'MqttContinuousLease',
+            max(1, (int) $delay) * 1000
+        );
+    }
+
+    /** @param array<string, int|string> $registry */
+    private function scheduleMqttContinuousRecovery(array $registry): void
+    {
+        $state = $registry['state'] ?? null;
+        if (
+            $this->effectiveMqttOperatingMode()
+            !== 'ContinuousReceiveOnly'
+            || !in_array(
+                $state,
+                ['CircuitOpen', 'HalfOpen', 'RecoveryConfirming'],
+                true
+            )
+        ) {
+            $this->SetTimerInterval('MqttContinuousRecovery', 0);
+            return;
+        }
+        $now = $this->currentTimestamp();
+        $target = match ($state) {
+            'CircuitOpen' => (int) ($registry['nextProbeAt'] ?? 0),
+            'HalfOpen' => (int) ($registry['probeDeadlineAt'] ?? 0),
+            default => min(
+                (int) ($registry['leaseExpiresAt'] ?? 0),
+                $now + self::MQTT_LIFECYCLE_OBSERVATION_SECONDS
+            ),
+        };
+        $this->SetTimerInterval(
+            'MqttContinuousRecovery',
+            max(1, $target - $now) * 1000
+        );
+    }
+
+    /** @param array<string, int|string> $registry */
+    private function continuousLeaseRenewalIsEligible(
+        array $registry
+    ): bool {
+        if (
+            ($registry['state'] ?? null) !== 'Active'
+            || !$this->continuousConfigurationMatches($registry)
+            || (bool) $this->GetValue('ReauthRequired')
+            || !$this->hasUsableAccessToken()
+            || $this->mqttCredentialRotationIsPending()
+        ) {
+            return false;
+        }
+        $lastRestSuccess = (int) $this->GetValue('LastRestSuccess');
+        $lifecycle = $this->mqttLifecycle();
+        $healthySince = (int) ($lifecycle['healthySince'] ?? 0);
+        if (
+            $lastRestSuccess <= 0
+            || $this->currentTimestamp() - $lastRestSuccess
+                > self::MQTT_CONTINUOUS_MAXIMUM_REST_AGE_SECONDS
+            || $healthySince <= 0
+            || $this->currentTimestamp() - $healthySince
+                < self::MQTT_LIFECYCLE_HEALTHY_RESET_SECONDS
+        ) {
+            return false;
+        }
+        try {
+            $topology = $this->mqttTopology();
+            return $this->mqttContinuousTransportIsHealthy($topology)
+                && $this->mqttTransportHasCredentials($topology);
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    /** @param array<string, int|string> $registry */
+    private function continuousRecoveryPrerequisitesAreReady(
+        array $registry
+    ): bool {
+        if (
+            !$this->continuousConfigurationMatches($registry)
+            || !$this->hasMinimumMqttTokenHorizon()
+            || (bool) $this->GetValue('ReauthRequired')
+            || $this->ReadAttributeInteger('RefreshRetryCount') > 0
+            || $this->mqttCredentialRotationIsPending()
+        ) {
+            return false;
+        }
+        $lastRestSuccess = (int) $this->GetValue('LastRestSuccess');
+        if (
+            $lastRestSuccess <= 0
+            || $this->currentTimestamp() - $lastRestSuccess
+                > self::MQTT_CONTINUOUS_MAXIMUM_REST_AGE_SECONDS
+        ) {
+            return false;
+        }
+        try {
+            return ($this->inspectMqttShadowConfiguration()['valid'] ?? false)
+                && $this->mqttTransportIsCredentialFree(
+                    $this->mqttTopology()
+                );
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    /** @param array<string, int|string> $registry */
+    private function continuousConfigurationMatches(array $registry): bool
+    {
+        try {
+            return preg_match(
+                '/^[a-f0-9]{64}$/D',
+                (string) ($registry['configurationHash'] ?? '')
+            ) === 1 && hash_equals(
+                (string) $registry['configurationHash'],
+                $this->mqttContinuousConfigurationHash()
+            );
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    private function mqttContinuousTransportIsHealthy(array $topology): bool
+    {
+        return $this->mqttCoreStatus($topology['mqttInstanceId']) === 102
+            && $this->mqttCoreStatus(
+                $topology['webSocketInstanceId']
+            ) === 102
+            && ($topology['webSocketConfiguration']['Active'] ?? null)
+                === true;
+    }
+
+    private function mqttTransportHasCredentials(array $topology): bool
+    {
+        $headers = $topology['webSocketConfiguration']['Headers'] ?? '';
+        if (is_string($headers)) {
+            $headers = json_decode($headers, true, 8);
+        }
+
+        return is_array($headers)
+            && $headers !== []
+            && ($topology['mqttConfiguration']['UserName'] ?? '') !== ''
+            && ($topology['mqttConfiguration']['Password'] ?? '') !== '';
+    }
+
+    private function openMqttContinuousCircuit(string $reason): void
+    {
+        try {
+            $decision = Navimow\MqttContinuousOperationReducer::openCircuit(
+                $this->mqttContinuousRegistry(),
+                $this->currentTimestamp(),
+                $reason
+            );
+            $this->writeMqttContinuousRegistry($decision['registry']);
+            $this->recordMqttStatistic('continuousCircuitOpenings');
+            $this->scheduleMqttContinuousRecovery(
+                $decision['registry']
+            );
+            $this->updateMqttOperatingVariables();
+        } catch (Throwable) {
+            $this->requestMqttContinuousStop('registry-invalid');
+        }
+    }
+
+    private function failMqttContinuousProbe(string $reason): void
+    {
+        try {
+            $this->disconnectOwnedMqttTransport();
+            $decision = Navimow\MqttContinuousOperationReducer::
+                halfOpenFailed(
+                    $this->mqttContinuousRegistry(),
+                    $this->currentTimestamp(),
+                    $reason
+                );
+            $this->writeMqttContinuousRegistry($decision['registry']);
+            $this->recordMqttStatistic('continuousHalfOpenFailures');
+            if ($decision['effect'] === 'clear-credentials') {
+                $this->scheduleMqttContinuousClosure();
+            } else {
+                $this->scheduleMqttContinuousRecovery(
+                    $decision['registry']
+                );
+            }
+            $this->updateMqttOperatingVariables();
+        } catch (Throwable) {
+            $this->requestMqttContinuousStop('ownership-invalid');
+        }
+    }
+
+    private function observeMqttContinuousHealth(bool $healthy): void
+    {
+        if (
+            $this->effectiveMqttOperatingMode()
+            !== 'ContinuousReceiveOnly'
+        ) {
+            return;
+        }
+        try {
+            $registry = $this->mqttContinuousRegistry();
+            $state = $registry['state'] ?? null;
+            if ($state === 'HalfOpen' && $healthy) {
+                $decision = Navimow\MqttContinuousOperationReducer::
+                    halfOpenConnected(
+                        $registry,
+                        $this->currentTimestamp()
+                    );
+            } elseif (
+                $state === 'RecoveryConfirming'
+                || $state === 'Starting'
+            ) {
+                $decision = Navimow\MqttContinuousOperationReducer::
+                    observeRecoveryHealth(
+                        $registry,
+                        $this->currentTimestamp(),
+                        $healthy
+                    );
+            } elseif ($state === 'Active' && !$healthy) {
+                return;
+            } else {
+                return;
+            }
+            $previousState = $state;
+            $this->writeMqttContinuousRegistry($decision['registry']);
+            if (
+                $previousState === 'RecoveryConfirming'
+                && ($decision['registry']['state'] ?? null) === 'Active'
+            ) {
+                $this->recordMqttStatistic(
+                    'continuousHalfOpenRecoveries'
+                );
+                $this->resetMqttReconnectEpisode();
+            }
+            if ($decision['effect'] === 'clear-credentials') {
+                $this->scheduleMqttContinuousClosure();
+            } else {
+                $this->scheduleMqttContinuousRecovery(
+                    $decision['registry']
+                );
+            }
+            $this->updateMqttOperatingVariables();
+        } catch (Throwable) {
+            $this->requestMqttContinuousStop('registry-invalid');
+        }
+    }
+
+    private function requestMqttContinuousStop(string $reason): void
+    {
+        try {
+            $decision = Navimow\MqttContinuousOperationReducer::requestStop(
+                $this->mqttContinuousRegistry(),
+                $this->currentTimestamp(),
+                $reason
+            );
+            $this->writeMqttContinuousRegistry($decision['registry']);
+        } catch (Throwable) {
+            $initial = Navimow\MqttContinuousOperationReducer::
+                initialState();
+            $decision = Navimow\MqttContinuousOperationReducer::requestStop(
+                $initial,
+                $this->currentTimestamp(),
+                'registry-invalid'
+            );
+            $this->writeMqttContinuousRegistry($decision['registry']);
+        }
+        $this->SetTimerInterval('MqttLifecycle', 0);
+        $this->SetTimerInterval('MqttContinuousLease', 0);
+        $this->SetTimerInterval('MqttContinuousRecovery', 0);
+        $this->clearMqttLifecycleSchedule();
+        $this->scheduleMqttContinuousClosure();
+        $this->updateMqttOperatingVariables();
+    }
+
+    private function scheduleMqttContinuousClosure(): void
+    {
+        $this->SetTimerInterval('MqttContinuousClosure', 1000);
+    }
+
+    /** @param array<string, int|string> $registry */
+    private function continuousStopForcesDisabledMaster(array $registry): bool
+    {
+        return in_array(
+            $registry['stopReason'] ?? null,
+            [
+                'operator-disabled',
+                'mode-changed',
+                'configuration-invalid',
+                'ownership-invalid',
+                'registry-invalid',
+                'update-incompatible',
+            ],
+            true
+        );
+    }
+
+    private function updateMqttOperatingVariables(): void
+    {
+        $mode = $this->effectiveMqttOperatingMode();
+        $lifecycleState = $this->mqttLifecycle()['state'] ?? null;
+        $operatingState = 0;
+        $leaseExpiresAt = 0;
+        try {
+            $registry = $this->mqttContinuousRegistry();
+            $leaseExpiresAt = (int) ($registry['leaseExpiresAt'] ?? 0);
+            $operatingState = match (true) {
+                $mode === 'ConfigurationError' => 8,
+                $mode === 'Disabled' => 0,
+                $lifecycleState
+                    === self::MQTT_LIFECYCLE_WAITING_FOR_AUTHENTICATION => 6,
+                $lifecycleState
+                    === self::MQTT_LIFECYCLE_REAUTHENTICATION_REQUIRED => 7,
+                $lifecycleState
+                    === self::MQTT_LIFECYCLE_CONFIGURATION_ERROR => 8,
+                $mode === 'ContinuousReceiveOnly'
+                    && !in_array(
+                        $registry['state'] ?? null,
+                        ['Suspended', 'Stopping', 'CredentialsCleared'],
+                        true
+                    )
+                    && !$this->hasMinimumMqttTokenHorizon() => 6,
+                in_array(
+                    $registry['state'] ?? null,
+                    ['Starting', 'HalfOpen'],
+                    true
+                ) => 1,
+                ($registry['state'] ?? null) === 'Active' => 2,
+                in_array(
+                    $registry['state'] ?? null,
+                    ['Degraded', 'RecoveryConfirming'],
+                    true
+                ) => 3,
+                ($registry['state'] ?? null) === 'CircuitOpen' => 4,
+                ($registry['state'] ?? null) === 'Suspended' => 5,
+                in_array(
+                    $registry['state'] ?? null,
+                    ['Stopping', 'CredentialsCleared'],
+                    true
+                ) => 9,
+                $mode === 'BoundedPilot'
+                    && $lifecycleState
+                        === self::MQTT_LIFECYCLE_SHADOW_ACTIVE => 2,
+                $mode === 'BoundedPilot'
+                    && $lifecycleState
+                        === self::MQTT_LIFECYCLE_RECONNECT_SCHEDULED => 3,
+                $mode === 'BoundedPilot' => 1,
+                default => 0,
+            };
+        } catch (Throwable) {
+            $operatingState = $mode === 'Disabled' ? 0 : 8;
+        }
+        $this->SetValue('MqttOperatingState', $operatingState);
+        $this->SetValue('MqttLeaseExpiresAt', $leaseExpiresAt);
+        $this->SetValue(
+            'MqttPositionFreshness',
+            $this->mqttPositionFreshnessValue()
+        );
+    }
+
+    private function mqttPositionFreshnessValue(): int
+    {
+        if (
+            !$this->ReadPropertyBoolean('EnableMqttShadow')
+            || !$this->ReadPropertyBoolean(
+                'EnableMqttPositionDiagnostics'
+            )
+        ) {
+            return 0;
+        }
+        $lastPositionAt = (int) $this->GetValue(
+            'MqttLastPositionAt'
+        );
+        $root = $this->decodeMqttAttribute(
+            'MqttPositionDiagnostic',
+            $this->initialMqttPositionDiagnosticRoot()
+        );
+        if ($lastPositionAt <= 0 || ($root['deviceKey'] ?? null) === null) {
+            return 0;
+        }
+        $age = max(0, $this->currentTimestamp() - $lastPositionAt);
+        if ($age <= self::MQTT_POSITION_FRESH_SECONDS) {
+            return 1;
+        }
+        if ($age <= self::MQTT_POSITION_DELAYED_SECONDS) {
+            return 2;
+        }
+
+        return 3;
+    }
+
+    private function mqttPositionFreshnessCode(): string
+    {
+        return match ($this->mqttPositionFreshnessValue()) {
+            1 => 'fresh',
+            2 => 'delayed',
+            3 => 'stale',
+            default => 'unavailable',
+        };
+    }
+
+    /** @return array<string, bool|int|string> */
+    private function mqttContinuousDiagnosticProjection(): array
+    {
+        $mode = $this->effectiveMqttOperatingMode();
+        try {
+            $registry = $this->mqttContinuousRegistry();
+            $configurationMatches = $mode === 'ContinuousReceiveOnly'
+                && $this->continuousConfigurationMatches($registry);
+        } catch (Throwable) {
+            $registry = Navimow\MqttContinuousOperationReducer::
+                initialState();
+            $registry['state'] = 'Stopped';
+            $registry['stopReason'] = 'registry-invalid';
+            $configurationMatches = false;
+        }
+
+        return [
+            'effectiveMode' => $mode,
+            'state' => (string) $registry['state'],
+            'sessionSequence' => (int) $registry['sessionSequence'],
+            'startedAt' => (int) $registry['startedAt'],
+            'leaseExpiresAt' => (int) $registry['leaseExpiresAt'],
+            'renewalEligibleAt' =>
+                (int) $registry['renewalEligibleAt'],
+            'lastLeaseRenewedAt' =>
+                (int) $registry['lastLeaseRenewedAt'],
+            'renewalCount' => (int) $registry['renewalCount'],
+            'circuitReason' => (string) $registry['circuitReason'],
+            'halfOpenProbeCount' =>
+                (int) $registry['halfOpenProbeCount'],
+            'nextProbeAt' => (int) $registry['nextProbeAt'],
+            'probeDeadlineAt' => (int) $registry['probeDeadlineAt'],
+            'recoveryHealthySince' =>
+                (int) $registry['recoveryHealthySince'],
+            'stopReason' => (string) $registry['stopReason'],
+            'stopRequestedAt' => (int) $registry['stopRequestedAt'],
+            'credentialsClearedAt' =>
+                (int) $registry['credentialsClearedAt'],
+            'stoppedAt' => (int) $registry['stoppedAt'],
+            'configurationMatches' => $configurationMatches,
+            'positionFreshness' => $this->mqttPositionFreshnessCode(),
+            'lastAcceptedMessageAt' =>
+                (int) $this->GetValue('MqttLastMessageAt'),
+            'lastAcceptedPositionAt' =>
+                (int) $this->GetValue('MqttLastPositionAt'),
+        ];
+    }
+
     private function initializeMqttLifecycle(): void
     {
         if (!$this->ReadPropertyBoolean('EnableMqttShadow')) {
@@ -2735,8 +3900,10 @@ class NavimowAccount extends IPSModule
 
     private function scheduleMqttStartupIfReady(): void
     {
+        $mode = $this->effectiveMqttOperatingMode();
         if (
-            !$this->ReadPropertyBoolean('EnableMqttShadow')
+            $mode === 'Disabled'
+            || $mode === 'ConfigurationError'
             || !$this->hasUsableAccessToken()
             || $this->ReadAttributeString('MqttOwnershipRegistry') === '{}'
             || !($this->inspectMqttShadowConfiguration()['valid'] ?? false)
@@ -2754,6 +3921,38 @@ class NavimowAccount extends IPSModule
                 $this->markMqttKernelReconciliationAwaitingMessage();
             }
             return;
+        }
+        if ($mode === 'ContinuousReceiveOnly') {
+            try {
+                $registry = $this->mqttContinuousRegistry();
+            } catch (Throwable) {
+                $this->requestMqttContinuousStop('registry-invalid');
+                return;
+            }
+            $state = $registry['state'] ?? null;
+            if (
+                $state === 'Suspended'
+                || in_array(
+                    $state,
+                    ['Stopping', 'CredentialsCleared'],
+                    true
+                )
+            ) {
+                return;
+            }
+            if (in_array($state, ['Inactive', 'Stopped'], true)) {
+                if (!$this->continuousStartPrerequisitesAreReady()) {
+                    $this->updateMqttOperatingVariables();
+                    return;
+                }
+                $this->startMqttContinuousOperation($registry);
+                return;
+            }
+            if ($this->mqttContinuousStateOwnsSession($state)) {
+                $this->scheduleMqttContinuousLease($registry);
+                $this->scheduleMqttContinuousRecovery($registry);
+                return;
+            }
         }
         $topology = $this->mqttTopology();
         if (!$this->mqttTransportIsCredentialFree($topology)) {
@@ -3241,6 +4440,25 @@ class NavimowAccount extends IPSModule
             return;
         }
         if (
+            $this->effectiveMqttOperatingMode()
+            === 'ContinuousReceiveOnly'
+        ) {
+            try {
+                if (
+                    !in_array(
+                        $this->mqttContinuousRegistry()['state'] ?? null,
+                        ['Starting', 'Active', 'Degraded'],
+                        true
+                    )
+                ) {
+                    return;
+                }
+            } catch (Throwable) {
+                $this->requestMqttContinuousStop('registry-invalid');
+                return;
+            }
+        }
+        if (
             $this->mqttKernelReconciliationIsPending()
             || $this->mqttKernelReconciliationMustTakePrecedence()
         ) {
@@ -3368,6 +4586,15 @@ class NavimowAccount extends IPSModule
                 self::MQTT_LIFECYCLE_DISCONNECTED,
                 'reconnect-exhausted'
             );
+            if (
+                $this->effectiveMqttOperatingMode()
+                === 'ContinuousReceiveOnly'
+            ) {
+                $this->openMqttContinuousCircuit(
+                    'inner-reconnect-exhausted'
+                );
+                return;
+            }
             $this->requestMqttPilotClosure(
                 'reconnect-exhausted',
                 $this->currentTimestamp()
@@ -3735,6 +4962,31 @@ class NavimowAccount extends IPSModule
                 );
                 $this->scheduleMqttPilotClosureProcessing();
             }
+            if (
+                $this->effectiveMqttOperatingMode()
+                === 'ContinuousReceiveOnly'
+            ) {
+                try {
+                    $continuousState =
+                        $this->mqttContinuousRegistry()['state'] ?? null;
+                    if (
+                        $this->mqttContinuousStateOwnsSession(
+                            $continuousState
+                        )
+                    ) {
+                        $this->requestMqttContinuousStop(
+                            $state
+                                === self::MQTT_LIFECYCLE_REAUTHENTICATION_REQUIRED
+                                    ? 'reauthentication-required'
+                                    : 'configuration-invalid'
+                        );
+                    }
+                } catch (Throwable) {
+                    $this->requestMqttContinuousStop(
+                        'registry-invalid'
+                    );
+                }
+            }
         }
     }
 
@@ -3780,6 +5032,7 @@ class NavimowAccount extends IPSModule
             'kernel-fallback',
             'reconnect',
             'rotation',
+            'half-open',
         ];
         if (in_array($scheduledTrigger, $allowed, true)) {
             return $scheduledTrigger;
@@ -3788,6 +5041,7 @@ class NavimowAccount extends IPSModule
         return match ($scheduledKind) {
             'reconnect' => 'reconnect',
             'rotation' => 'rotation',
+            'half-open' => 'half-open',
             default => 'initial',
         };
     }
@@ -6297,10 +7551,7 @@ class NavimowAccount extends IPSModule
             'MqttPilotObservationRegistry',
             []
         );
-        $sessionSequence = is_int($pilot['sessionSequence'] ?? null)
-            && $pilot['sessionSequence'] >= 0
-                ? $pilot['sessionSequence']
-                : 0;
+        $sessionSequence = $this->currentMqttSessionSequence($pilot);
         $ledger = Navimow\MqttTaskObservationLedger::reduce(
             $ledger,
             $fields,
@@ -6380,10 +7631,7 @@ class NavimowAccount extends IPSModule
             'MqttPilotObservationRegistry',
             []
         );
-        $sessionSequence = is_int($pilot['sessionSequence'] ?? null)
-            && $pilot['sessionSequence'] >= 0
-                ? $pilot['sessionSequence']
-                : 0;
+        $sessionSequence = $this->currentMqttSessionSequence($pilot);
         $root['state'] = Navimow\MqttPositionDiagnostic::reduce(
             $state,
             $pose,
@@ -6394,6 +7642,36 @@ class NavimowAccount extends IPSModule
             'MqttPositionDiagnostic',
             $this->encodeResult($root)
         );
+        $this->SetValue(
+            'MqttLastPositionAt',
+            max(
+                (int) $this->GetValue('MqttLastPositionAt'),
+                $receivedAt
+            )
+        );
+    }
+
+    /** @param array<string, mixed> $pilot */
+    private function currentMqttSessionSequence(array $pilot): int
+    {
+        if (
+            $this->effectiveMqttOperatingMode()
+            === 'ContinuousReceiveOnly'
+        ) {
+            try {
+                $sequence = $this->mqttContinuousRegistry()[
+                    'sessionSequence'
+                ] ?? null;
+                return is_int($sequence) && $sequence >= 0
+                    ? $sequence
+                    : 0;
+            } catch (Throwable) {
+                return 0;
+            }
+        }
+
+        $sequence = $pilot['sessionSequence'] ?? null;
+        return is_int($sequence) && $sequence >= 0 ? $sequence : 0;
     }
 
     private function queueMqttReconciliation(
@@ -6743,6 +8021,15 @@ class NavimowAccount extends IPSModule
                 + ($rejected ? 1 : 0);
         $statistics['lastResult'] = $result;
         $statistics['lastReceivedAt'] = $this->currentTimestamp();
+        if (!$rejected) {
+            $this->SetValue(
+                'MqttLastMessageAt',
+                max(
+                    (int) $this->GetValue('MqttLastMessageAt'),
+                    $this->currentTimestamp()
+                )
+            );
+        }
         $this->WriteAttributeString(
             'MqttStatistics',
             $this->encodeResult($statistics)

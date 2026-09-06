@@ -43,9 +43,24 @@
       "caption": "Enable experimental MQTT shadow"
     },
     {
+      "type": "Select",
+      "name": "MqttOperatingMode",
+      "caption": "MQTT operating mode",
+      "options": [
+        {
+          "caption": "Bounded pilot",
+          "value": 1
+        },
+        {
+          "caption": "Continuous receive-only",
+          "value": 2
+        }
+      ]
+    },
+    {
       "type": "NumberSpinner",
       "name": "MqttPilotMaximumDurationSeconds",
-      "caption": "MQTT pilot maximum duration (seconds)",
+      "caption": "Bounded MQTT pilot maximum duration (seconds)",
       "minimum": 300,
       "maximum": 259200
     },
@@ -64,7 +79,7 @@
     },
     {
       "type": "Label",
-      "caption": "MQTT shadow is optional and internal. REST remains authoritative."
+      "caption": "MQTT is receive-only and REST remains authoritative. Bounded pilot uses a deadline; continuous mode uses renewable safety leases."
     }
   ],
   "actions": [
@@ -135,6 +150,12 @@
       "caption": "Disconnect MQTT Shadow",
       "confirm": "Deactivate the owned WebSocket and clear its private MQTT credentials?",
       "onClick": "echo NAVAC_DisconnectMqttShadow($id);"
+    },
+    {
+      "type": "Button",
+      "caption": "Resume Continuous MQTT",
+      "confirm": "Start one new receive-only safety lease and schedule one initial connection attempt?",
+      "onClick": "echo NAVAC_ResumeMqttContinuousOperation($id);"
     },
     {
       "type": "Button",

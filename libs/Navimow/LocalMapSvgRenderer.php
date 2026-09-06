@@ -249,13 +249,17 @@ final class LocalMapSvgRenderer
                 $viewport
             );
             $mowerMarkup = sprintf(
-                '<g class="mower mower-%s" data-heading-degrees="%s" transform="translate(%s %s) rotate(%s)"><title>%s</title>%s</g>',
+                '<g class="mower mower-%s mower-position-%s" data-heading-degrees="%s" transform="translate(%s %s) rotate(%s)"><title>%s</title><circle class="mower-freshness-halo" r="3.15"/>%s</g>',
                 self::escape($mowerState),
+                self::escape($presentation['positionFreshness']),
                 self::number($mowerRotation),
                 self::number($mower[0]),
                 self::number($mower[1]),
                 self::number($mowerRotation),
-                self::escape(self::mowerTitle($mowerState)),
+                self::escape(self::mowerTitle(
+                    $mowerState,
+                    $presentation['positionFreshness']
+                )),
                 self::mowerGlyph()
             );
         }
@@ -424,7 +428,7 @@ final class LocalMapSvgRenderer
 
     /**
      * @param array<string, float> $viewport
-     * @param array{hiddenZoneSequences: list<int>, stationState: string, mowerState: string, showMower: bool, theme: string} $presentation
+     * @param array{hiddenZoneSequences: list<int>, stationState: string, mowerState: string, showMower: bool, positionFreshness: string, theme: string} $presentation
      */
     private static function legendMarkup(
         array $viewport,
@@ -438,7 +442,7 @@ final class LocalMapSvgRenderer
             $viewport['width'] * 0.52,
             max(26.0, $font * 18.0)
         );
-        $height = $padding * 2.0 + $row * 10.0;
+        $height = $padding * 2.0 + $row * 11.0;
         $inset = max(0.8, $span / 110.0);
         $x = $viewport['maximumX'] - $inset - $width;
         $y = $viewport['maximumY'] - $inset - $height;
@@ -576,10 +580,17 @@ final class LocalMapSvgRenderer
             $text($rowY(8), 'Sperrbereich')
         );
         $markup .= sprintf(
-            '<g class="legend-points" transform="translate(%s %s)"><circle class="legend-point-outside" cx="-.9" r=".38"><title>Außerhalb der Kartenzone</title></circle><circle class="legend-point-ambiguous" r=".38"><title>Uneindeutige Zonenzuordnung</title></circle><circle class="legend-point-unknown" cx=".9" r=".38"><title>Unbekannte Aufgabenzone</title></circle></g>%s</g>',
+            '<g class="legend-points" transform="translate(%s %s)"><circle class="legend-point-outside" cx="-.9" r=".38"><title>Außerhalb der Kartenzone</title></circle><circle class="legend-point-ambiguous" r=".38"><title>Uneindeutige Zonenzuordnung</title></circle><circle class="legend-point-unknown" cx=".9" r=".38"><title>Unbekannte Aufgabenzone</title></circle></g>%s',
             self::number($iconX),
             self::number($rowY(9)),
             $text($rowY(9), 'Zuordnung prüfen')
+        );
+        $markup .= sprintf(
+            '<circle class="legend-freshness-delayed" cx="%s" cy="%s" r="%s"/>%s</g>',
+            self::number($iconX),
+            self::number($rowY(10)),
+            self::number($font * 0.55),
+            $text($rowY(10), 'Position verspätet')
         );
 
         return $markup;
@@ -701,6 +712,7 @@ final class LocalMapSvgRenderer
                 $strokeWidth
             ),
             '.mower-direction,.legend-mower .mower-direction{fill:none;stroke:#ffffff;stroke-linecap:round;stroke-linejoin:round}',
+            '.mower-freshness-halo{display:none;fill:none;stroke:#ffb020;stroke-width:.72;stroke-dasharray:1.25 .8;vector-effect:non-scaling-stroke}.mower-position-delayed .mower-freshness-halo{display:inline}.legend-freshness-delayed{fill:none;stroke:#ffb020;stroke-width:.72;stroke-dasharray:1.25 .8;vector-effect:non-scaling-stroke}',
             '.mower-active .mower-body,.legend-mower-active .mower-body,.state-active{fill:#39d98a;stroke:#0b3b29}',
             '.mower-paused .mower-body,.legend-mower-paused .mower-body,.state-paused{fill:#ffd166;stroke:#6e4b0a}',
             '.mower-returning .mower-body,.legend-mower-returning .mower-body,.state-returning{fill:#ff9f1c;stroke:#70420a}',
@@ -749,7 +761,7 @@ final class LocalMapSvgRenderer
     /**
      * @param array<string, mixed> $options
      *
-     * @return array{hiddenZoneSequences: list<int>, stationState: string, mowerState: string, showMower: bool, theme: string}
+     * @return array{hiddenZoneSequences: list<int>, stationState: string, mowerState: string, showMower: bool, positionFreshness: string, theme: string}
      */
     private static function options(array $options): array
     {
@@ -757,6 +769,7 @@ final class LocalMapSvgRenderer
         $stationState = $options['stationState'] ?? 'unknown';
         $mowerState = $options['mowerState'] ?? 'unknown';
         $showMower = $options['showMower'] ?? true;
+        $positionFreshness = $options['positionFreshness'] ?? 'fresh';
         $theme = $options['theme'] ?? 'dark';
         if (
             !is_array($hidden)
@@ -765,6 +778,12 @@ final class LocalMapSvgRenderer
             || !is_string($stationState)
             || !is_string($mowerState)
             || !is_bool($showMower)
+            || !is_string($positionFreshness)
+            || !in_array(
+                $positionFreshness,
+                ['fresh', 'delayed', 'stale', 'unavailable'],
+                true
+            )
             || !is_string($theme)
             || !in_array($theme, ['dark', 'light'], true)
             || !in_array(
@@ -810,6 +829,7 @@ final class LocalMapSvgRenderer
             'stationState' => $stationState,
             'mowerState' => $mowerState,
             'showMower' => $showMower,
+            'positionFreshness' => $positionFreshness,
             'theme' => $theme,
         ];
     }
@@ -827,9 +847,11 @@ final class LocalMapSvgRenderer
         };
     }
 
-    private static function mowerTitle(string $state): string
-    {
-        return match ($state) {
+    private static function mowerTitle(
+        string $state,
+        string $positionFreshness = 'fresh'
+    ): string {
+        $title = match ($state) {
             'active' => 'Mower active',
             'paused' => 'Mower paused or ready',
             'returning' => 'Mower returning to station',
@@ -841,6 +863,10 @@ final class LocalMapSvgRenderer
                 'Mower state is invalid.'
             ),
         };
+
+        return $positionFreshness === 'delayed'
+            ? $title . '; position delayed'
+            : $title;
     }
 
     private static function diagnosticTitle(string $source): string

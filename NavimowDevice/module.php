@@ -216,7 +216,7 @@ class NavimowDevice extends IPSModule
                 );
             }
             $status = $evidence['status'] ?? null;
-            if (!in_array($status, ['ok', 'stale'], true)) {
+            if (!in_array($status, ['ok', 'delayed', 'stale'], true)) {
                 if (
                     in_array(
                         $status,
@@ -319,8 +319,17 @@ class NavimowDevice extends IPSModule
             $svg = Navimow\LocalMapSvgRenderer::render($scene, [
                 'stationState' => $this->localMapStationState(),
                 'mowerState' => $this->localMapMowerState(),
-                'showMower' => $status === 'ok'
+                'showMower' => in_array(
+                    $status,
+                    ['ok', 'delayed'],
+                    true
+                )
                     && $this->localMapMowerState() !== 'docked',
+                'positionFreshness' => match ($status) {
+                    'ok' => 'fresh',
+                    'delayed' => 'delayed',
+                    default => 'stale',
+                },
                 'hiddenZoneSequences' => $this->hiddenZoneSequences(),
                 'theme' => $this->localMapTheme(),
             ]);
@@ -1369,6 +1378,7 @@ class NavimowDevice extends IPSModule
                 'stationState' => $this->localMapStationState(),
                 'mowerState' => $this->localMapMowerState(),
                 'showMower' => false,
+                'positionFreshness' => 'unavailable',
                 'hiddenZoneSequences' => $this->hiddenZoneSequences(),
                 'theme' => $this->localMapTheme(),
             ]),
