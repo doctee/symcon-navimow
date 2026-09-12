@@ -12,6 +12,7 @@
     const zoneSelect = root.querySelector('[data-zone]');
     const followButton = root.querySelector('[data-follow]');
     const pointers = new Map();
+    const viewportEdgeInset = 6;
     const state = {
         svg: null,
         fitViewBox: null,
@@ -20,7 +21,51 @@
         following: false,
         drag: null,
         pinch: null,
+        legendFrame: null,
     };
+
+    function alignLegendRight()
+    {
+        if (!state.svg) {
+            return;
+        }
+        const legend = state.svg.querySelector('.legend[data-anchor-x][data-anchor-y]');
+        if (!legend) {
+            return;
+        }
+        const anchorX = Number(legend.dataset.anchorX);
+        const anchorY = Number(legend.dataset.anchorY);
+        if (!Number.isFinite(anchorX) || !Number.isFinite(anchorY)) {
+            return;
+        }
+        legend.setAttribute('transform', 'translate(' + anchorX + ' ' + anchorY + ')');
+        const mapRect = root.getBoundingClientRect();
+        const legendRect = legend.getBoundingClientRect();
+        const matrix = state.svg.getScreenCTM();
+        if (!matrix) {
+            return;
+        }
+        const scale = Math.hypot(matrix.a, matrix.b);
+        if (!(scale > 0)) {
+            return;
+        }
+        const delta = mapRect.right - viewportEdgeInset - legendRect.right;
+        legend.setAttribute(
+            'transform',
+            'translate(' + (anchorX + delta / scale) + ' ' + anchorY + ')'
+        );
+    }
+
+    function scheduleLegendAlignment()
+    {
+        if (state.legendFrame !== null) {
+            cancelAnimationFrame(state.legendFrame);
+        }
+        state.legendFrame = requestAnimationFrame(function () {
+            state.legendFrame = null;
+            alignLegendRight();
+        });
+    }
 
     function parseViewBox(svg)
     {
@@ -39,6 +84,7 @@
         }
         state.viewBox = values;
         state.svg.setAttribute('viewBox', values.join(' '));
+        scheduleLegendAlignment();
     }
 
     function zoom(factor, clientX, clientY)
@@ -226,6 +272,7 @@
         if (state.following) {
             focusMower();
         }
+        scheduleLegendAlignment();
     }
 
     function handleMessage(message)
@@ -353,4 +400,5 @@
     });
 
     window.handleMessage = handleMessage;
+    window.addEventListener('resize', scheduleLegendAlignment);
 }());

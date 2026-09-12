@@ -257,8 +257,8 @@ final class LocalMapSvgRenderer
             ], $viewport);
             $direction = $scene['station']['direction'] ?? null;
             $rotation = $direction === null
-                ? -8.0
-                : -rad2deg(self::finite($direction)) - 8.0;
+                ? -7.0
+                : 180.0 - rad2deg(self::finite($direction)) - 7.0;
             $stationState = $presentation['stationState'];
             $stationMarkup = sprintf(
                 '<g class="station station-%s" transform="translate(%s %s) rotate(%s)"><title>%s</title>%s</g>',
@@ -477,7 +477,7 @@ final class LocalMapSvgRenderer
         $padding = $font * 0.8;
         $width = min(
             $viewport['width'] * 0.52,
-            max(26.0, $font * 19.0)
+            max(26.0, $font * 16.5)
         );
         $height = $padding * 2.0 + $row * 11.0;
         $inset = max(0.8, $span / 110.0);
@@ -516,7 +516,9 @@ final class LocalMapSvgRenderer
         };
 
         $markup = sprintf(
-            '<g class="legend" transform="translate(%s %s)"><title>Symbollegende</title><rect class="legend-background" width="%s" height="%s" rx="%s"/>',
+            '<g class="legend" data-anchor-x="%s" data-anchor-y="%s" transform="translate(%s %s)"><title>Symbollegende</title><rect class="legend-background" width="%s" height="%s" rx="%s"/>',
+            self::number($x),
+            self::number($y),
             self::number($x),
             self::number($y),
             self::number($width),

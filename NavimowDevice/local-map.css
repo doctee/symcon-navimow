@@ -80,7 +80,8 @@ body {
 
 .nav-map__navigation {
     top: 52px;
-    right: 6px;
+    left: 6px;
+    right: auto;
     display: grid;
     grid-template-columns: 34px 34px 46px 62px minmax(104px, 150px);
     gap: 3px;
