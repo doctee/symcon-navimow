@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+    <style>/* SAEF_NAVIMOW_MAP_STYLE */</style>
+</head>
+<body>
+<main class="nav-map" data-navimow-map>
+    <div class="nav-map__surface" data-map-surface tabindex="0"
+        aria-label="Interaktive lokale Navimow-Karte">
+        <div class="nav-map__stage" data-map-stage></div>
+    </div>
+    <nav class="nav-map__navigation" aria-label="Kartennavigation">
+        <button type="button" data-zoom-in title="Vergrößern" aria-label="Vergrößern">+</button>
+        <button type="button" data-zoom-out title="Verkleinern" aria-label="Verkleinern">−</button>
+        <button type="button" data-fit title="Gesamte Karte zeigen">Fit</button>
+        <button type="button" data-follow title="Mäher folgen">Mäher</button>
+        <select data-zone aria-label="Zone fokussieren">
+            <option value="">Alle Zonen</option>
+        </select>
+    </nav>
+    <section class="nav-map__statistics" data-statistics aria-label="Mähstatistik"></section>
+    <output class="nav-map__status" data-status role="status" aria-live="polite"></output>
+</main>
+<script>/* SAEF_NAVIMOW_MAP_SCRIPT */</script>
+<script>handleMessage(/* SAEF_NAVIMOW_MAP_BOOTSTRAP */);</script>
+</body>
+</html>

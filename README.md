@@ -33,14 +33,24 @@ Implemented:
 - an optional revision-bound local map with REST-authoritative station and
   mower-state colors;
 - optional per-zone pass-progress, retained observed-area, freshness and
-  evidence-quality variables.
+  evidence-quality variables;
+- optional, default-disabled mowing-run distance, active-duration and
+  geometric area estimates;
+- optional daily, weekly and monthly estimated mowing area plus 7/14-day
+  mowing recency per configured zone;
+- optional revision-bound subarea projections for later smaller-area
+  statistics; and
+- an additive edge-to-edge HTML SDK Local Map with pan, wheel/button zoom,
+  pinch zoom, Fit, mower follow and per-zone focus.
 
 Not implemented:
 
 - Start;
 - Stop;
 - MQTT device commands;
-- geometric mowing-coverage percentages;
+- measured or manufacturer-authoritative mowing coverage;
+- rain-cause statistics;
+- public subarea variables;
 - Symcon Store packaging.
 
 ## Installation
@@ -76,6 +86,17 @@ NAVAC_WakePolling($accountInstanceID);
 This opens a bounded three-minute fast-poll window and triggers one immediate
 read-only refresh. The caller supplies no mower state. Installation-specific
 sensors and ObjectIDs must remain outside this repository.
+
+Mowing analytics is disabled by default. Geometric area and coverage require a
+verified positive cutting width and coordinate scale. Results are bounded
+diagnostic estimates derived from receive-only MQTT positions, not blade-state
+measurements. Week and month totals sum daily unique-cell estimates, so land
+mowed on different days counts once per day.
+
+The module never changes Archive Control logging or aggregation. Existing
+logging remains attached to stable variables. Logging for new analytics
+variables is an installation-owned operation after a supported module update
+and variable-identity postflight.
 
 For private Git installations, update through Symcon's module management after
 new commits are published to the repository.
@@ -173,6 +194,10 @@ Those failure paths are covered by deterministic no-network tests.
 - The module uses an undocumented Navimow cloud API.
 - MQTT is receive-only, diagnostic and non-authoritative; REST remains the
   source of public mower state.
+- Geometric mowing area can be underestimated by sparse positions and can
+  include Running transit where cutting is not independently proven.
+- Optional subareas must be rebound when the accepted map geometry revision
+  changes.
 - Status is REST-polled and may lag behind the official app.
 - Optional external wake hints are installation-specific and not distributed.
 - Only one mower has direct live transition evidence in this case study.
