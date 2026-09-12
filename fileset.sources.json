@@ -55,8 +55,8 @@
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/form.json",
             "target": "NavimowDevice/form.json",
-            "sha256": "d61598b837ed2bce006d95166de02bf198356df6e9bbe172592f9590c9a5b66e",
-            "bytes": 4142
+            "sha256": "46f160cbcedf2580c8ab1ab605079b78ba43c3b0ad87eeb583d9e1437becf5d7",
+            "bytes": 4135
         },
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/local-map.css",
@@ -263,7 +263,7 @@
             "bytes": 3780
         }
     ],
-    "filesetSha256": "17f22de4d78500c135983fcb4ce00dc2ec7ad25b636021d55d92595ed565bc69",
+    "filesetSha256": "82a66fd6b03a2746005d4f01d7ecf55d5fbb88aee4e4c52399d5660fcb931c87",
     "builderVersion": "1.0.0",
     "license": {
         "identifier": "PolyForm-Noncommercial-1.0.0",

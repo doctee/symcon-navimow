@@ -93,7 +93,7 @@
       "name": "MetersPerLocalUnit",
       "caption": "Meters per local coordinate unit",
       "digits": 3,
-      "minimum": 0.001,
+      "minimum": 0,
       "maximum": 1000
     },
     {
@@ -111,7 +111,7 @@
       "caption": "Coverage grid cell size",
       "suffix": " m",
       "digits": 2,
-      "minimum": 0.01,
+      "minimum": 0,
       "maximum": 5
     },
     {
