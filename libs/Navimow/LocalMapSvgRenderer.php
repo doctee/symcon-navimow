@@ -477,7 +477,7 @@ final class LocalMapSvgRenderer
         $padding = $font * 0.8;
         $width = min(
             $viewport['width'] * 0.52,
-            max(26.0, $font * 18.0)
+            max(26.0, $font * 19.0)
         );
         $height = $padding * 2.0 + $row * 11.0;
         $inset = max(0.8, $span / 110.0);

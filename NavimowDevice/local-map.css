@@ -1,5 +1,5 @@
 :root {
-    color-scheme: light dark;
+    color-scheme: dark;
 }
 
 html,
@@ -8,15 +8,16 @@ body {
     height: 100%;
     margin: 0;
     overflow: hidden;
-    background: var(--content-color, light-dark(#f8fafc, #171b1f));
+    background: #171b1f;
 }
 
 .nav-map {
-    --nav-surface: var(--content-color, light-dark(#f8fafc, #171b1f));
-    --nav-panel: light-dark(rgba(255, 255, 255, 0.94), rgba(32, 38, 43, 0.94));
-    --nav-border: light-dark(rgba(31, 41, 55, 0.22), rgba(232, 237, 239, 0.24));
-    --nav-text: var(--content-color-contrast, light-dark(#172026, #f2f5f4));
-    --nav-accent: var(--accent-color, light-dark(#086788, #55c1e7));
+    --nav-surface: #171b1f;
+    --nav-panel: rgba(32, 38, 43, 0.96);
+    --nav-panel-solid: #20262b;
+    --nav-border: rgba(232, 237, 239, 0.28);
+    --nav-text: #f2f5f4;
+    --nav-accent: #55c1e7;
     position: relative;
     width: 100%;
     height: 100%;
@@ -26,6 +27,21 @@ body {
     color: var(--nav-text);
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     isolation: isolate;
+    color-scheme: dark;
+}
+
+.nav-map[data-theme="light"] {
+    --nav-surface: #f8fafc;
+    --nav-panel: rgba(255, 255, 255, 0.96);
+    --nav-panel-solid: #ffffff;
+    --nav-border: rgba(31, 41, 55, 0.24);
+    --nav-text: #172026;
+    --nav-accent: #086788;
+    color-scheme: light;
+}
+
+.nav-map[data-theme="dark"] {
+    color-scheme: dark;
 }
 
 .nav-map__surface,
@@ -63,7 +79,7 @@ body {
 }
 
 .nav-map__navigation {
-    top: 6px;
+    top: 52px;
     right: 6px;
     display: grid;
     grid-template-columns: 34px 34px 46px 62px minmax(104px, 150px);
@@ -71,6 +87,7 @@ body {
     padding: 3px;
     border-radius: 6px;
     touch-action: auto;
+    pointer-events: auto;
 }
 
 .nav-map__navigation button,
@@ -85,6 +102,8 @@ body {
     font: inherit;
     font-size: 12px;
     letter-spacing: 0;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
 }
 
 .nav-map__navigation button {
@@ -99,6 +118,13 @@ body {
 
 .nav-map__navigation select {
     padding: 0 5px;
+    background-color: var(--nav-panel-solid);
+    color-scheme: inherit;
+}
+
+.nav-map__navigation select option {
+    background-color: var(--nav-panel-solid);
+    color: var(--nav-text);
 }
 
 .nav-map__statistics {
@@ -180,7 +206,7 @@ body {
 @media (pointer: coarse) {
     .nav-map__navigation button,
     .nav-map__navigation select {
-        height: 36px;
+        height: 44px;
         font-size: 13px;
     }
 }
