@@ -26,7 +26,7 @@
 
     function alignLegendRight()
     {
-        if (!state.svg) {
+        if (!state.svg || !state.fitViewBox) {
             return;
         }
         const legend = state.svg.querySelector('.legend[data-anchor-x][data-anchor-y]');
@@ -39,20 +39,41 @@
             return;
         }
         legend.setAttribute('transform', 'translate(' + anchorX + ' ' + anchorY + ')');
-        const mapRect = root.getBoundingClientRect();
-        const legendRect = legend.getBoundingClientRect();
+        const mapRect = state.svg.getBoundingClientRect();
         const matrix = state.svg.getScreenCTM();
-        if (!matrix) {
+        if (!matrix || !(mapRect.width > 0) || !(mapRect.height > 0)) {
             return;
         }
-        const scale = Math.hypot(matrix.a, matrix.b);
-        if (!(scale > 0)) {
+        const currentScale = Math.min(
+            Math.hypot(matrix.a, matrix.b),
+            Math.hypot(matrix.c, matrix.d)
+        );
+        const fitScale = Math.min(
+            mapRect.width / state.fitViewBox[2],
+            mapRect.height / state.fitViewBox[3]
+        );
+        if (!(currentScale > 0) || !(fitScale > 0)) {
             return;
         }
-        const delta = mapRect.right - viewportEdgeInset - legendRect.right;
+        const counterScale = fitScale / currentScale;
+        const legendBox = legend.getBBox();
+        if (!(legendBox.width > 0) || !(legendBox.height > 0)) {
+            return;
+        }
+        const statisticsRect = statistics.getBoundingClientRect();
+        const bottomInset = viewportEdgeInset
+            + (statisticsRect.height > 0 ? statisticsRect.height : 0);
+        const target = state.svg.createSVGPoint();
+        target.x = mapRect.right - viewportEdgeInset;
+        target.y = mapRect.bottom - bottomInset;
+        const viewportTarget = target.matrixTransform(matrix.inverse());
+        const x = viewportTarget.x
+            - (legendBox.x + legendBox.width) * counterScale;
+        const y = viewportTarget.y
+            - (legendBox.y + legendBox.height) * counterScale;
         legend.setAttribute(
             'transform',
-            'translate(' + (anchorX + delta / scale) + ' ' + anchorY + ')'
+            'translate(' + x + ' ' + y + ') scale(' + counterScale + ')'
         );
     }
 
