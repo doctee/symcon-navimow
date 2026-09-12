@@ -95,8 +95,26 @@ final class Profiles
             3 => 'Stale',
         ]);
 
+        self::ensureIntegerProfile('NAVIMOW.MowingAnalyticsState', [
+            0 => 'Disabled',
+            1 => 'No Data',
+            2 => 'Available',
+            3 => 'Stale',
+            4 => 'Invalid',
+        ]);
+
+        self::ensureIntegerProfile('NAVIMOW.MowingRecencyState', [
+            0 => 'Unknown',
+            1 => 'Current',
+            2 => 'Due',
+            3 => 'Overdue',
+        ]);
+
         self::ensureFloatProfile('NAVIMOW.Percentage', ' %', 1);
         self::ensureFloatProfile('NAVIMOW.Area', ' m²', 1);
+        self::ensureFloatProfile('NAVIMOW.Distance', ' m', 1);
+        self::ensureFloatProfile('NAVIMOW.AreaPerformance', ' m²/h', 1);
+        self::ensureIntegerUnitProfile('NAVIMOW.Duration', ' s');
     }
 
     private static function ensureIntegerProfile(string $name, array $associations): void
@@ -120,6 +138,17 @@ final class Profiles
         }
 
         IPS_SetVariableProfileDigits($name, $digits);
+        IPS_SetVariableProfileText($name, '', $suffix);
+    }
+
+    private static function ensureIntegerUnitProfile(
+        string $name,
+        string $suffix
+    ): void {
+        if (!IPS_VariableProfileExists($name)) {
+            IPS_CreateVariableProfile($name, 1);
+        }
+
         IPS_SetVariableProfileText($name, '', $suffix);
     }
 }

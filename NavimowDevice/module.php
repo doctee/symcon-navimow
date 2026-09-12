@@ -17,6 +17,7 @@ require_once __DIR__ . '/../libs/Navimow/ZoneStatisticsReducer.php';
 require_once __DIR__ . '/../libs/Navimow/LocalMapSceneProjector.php';
 require_once __DIR__ . '/../libs/Navimow/RevisionBoundedTrackStore.php';
 require_once __DIR__ . '/../libs/Navimow/LocalMapSvgRenderer.php';
+require_once __DIR__ . '/../libs/Navimow/MowingAnalyticsReducer.php';
 
 class NavimowDevice extends IPSModule
 {
@@ -57,6 +58,8 @@ class NavimowDevice extends IPSModule
     private const LOCAL_MAP_MAX_ERROR_ENTRIES = 20;
     private const LOCAL_MAP_REST_STALE_SECONDS = 300;
     private const LOCAL_MAP_SEMAPHORE_TIMEOUT_MILLISECONDS = 1000;
+    private const VISUALIZATION_TYPE_HTML = 1;
+    private const LOCAL_MAP_VISUALIZATION_MAX_BYTES = 1024 * 1024;
 
     public function Create()
     {
@@ -67,6 +70,7 @@ class NavimowDevice extends IPSModule
         $this->RegisterPropertyBoolean('DebugPayloads', false);
         $this->RegisterPropertyBoolean('EnableLocalMap', false);
         $this->RegisterPropertyBoolean('EnableZoneStatistics', false);
+        $this->RegisterPropertyBoolean('EnableMowingAnalytics', false);
         $this->RegisterPropertyString('AcceptedMapProjection', '');
         $this->RegisterPropertyString('AcceptedGeometryKey', '');
         $this->RegisterPropertyString('HiddenZoneSequences', '[1]');
@@ -74,6 +78,13 @@ class NavimowDevice extends IPSModule
         $this->RegisterPropertyInteger('TrackRetentionHours', 72);
         $this->RegisterPropertyInteger('MapRefreshInterval', 60);
         $this->RegisterPropertyInteger('MapIdleRefreshInterval', 300);
+        $this->RegisterPropertyString('StatisticsTimeZone', 'UTC');
+        $this->RegisterPropertyFloat('MetersPerLocalUnit', 1.0);
+        $this->RegisterPropertyFloat('CuttingWidthMeters', 0.0);
+        $this->RegisterPropertyFloat('CoverageCellSizeMeters', 0.1);
+        $this->RegisterPropertyInteger('MowingRecencyWarningDays', 7);
+        $this->RegisterPropertyInteger('MowingRecencyCriticalDays', 14);
+        $this->RegisterPropertyString('StatisticsSubareas', '[]');
 
         $this->RegisterAttributeBoolean('CommandActive', false);
         $this->RegisterAttributeInteger('CommandCloudResult', 0);
@@ -88,6 +99,8 @@ class NavimowDevice extends IPSModule
         $this->RegisterAttributeString('LocalMapStatisticsGeometryKey', '');
         $this->RegisterAttributeString('LocalMapRenderMetadata', '{}');
         $this->RegisterAttributeString('LocalMapErrorHistory', '[]');
+        $this->RegisterAttributeString('MowingAnalyticsState', '{}');
+        $this->RegisterAttributeString('LocalMapVisualizationState', '{}');
 
         $this->RegisterTimer(
             'CommandVerification',
@@ -100,6 +113,13 @@ class NavimowDevice extends IPSModule
             'NAVDV_RefreshLocalMap($_IPS["TARGET"]);'
         );
         $this->registerKernelStartMessage();
+
+        $visualizationType = defined(
+            'INSTANCE_VISUALIZATION_TYPE_HTML_FULLSCREEN'
+        )
+            ? (int) constant('INSTANCE_VISUALIZATION_TYPE_HTML_FULLSCREEN')
+            : self::VISUALIZATION_TYPE_HTML;
+        $this->SetVisualizationType($visualizationType);
     }
 
     public function ApplyChanges()
@@ -124,6 +144,12 @@ class NavimowDevice extends IPSModule
             $this->SetValue('StatisticsState', 0);
         }
 
+        if ($this->ReadPropertyBoolean('EnableMowingAnalytics')) {
+            $this->registerMowingAnalyticsVariables();
+        } elseif ($this->variableExists('MowingAnalyticsStatus')) {
+            $this->SetValue('MowingAnalyticsStatus', 0);
+        }
+
         if ($this->ReadPropertyBoolean('DebugPayloads')) {
             $this->RegisterVariableString('RawStatusJson', 'Raw Status JSON', '', 90);
         }
@@ -141,6 +167,15 @@ class NavimowDevice extends IPSModule
             $this->SetTimerInterval('LocalMapRefresh', 0);
             $this->SetValue('LocalMap', '');
             $this->setLocalMapHidden(true);
+            if (
+                $this->ReadPropertyBoolean('EnableMowingAnalytics')
+                && $this->variableExists('MowingAnalyticsStatus')
+            ) {
+                $this->SetValue('MowingAnalyticsStatus', 4);
+            }
+            $this->publishLocalMapVisualizationError(
+                'Local map is not configured.'
+            );
         }
 
         $this->SetStatus(self::INSTANCE_STATUS_ACTIVE);
@@ -229,6 +264,11 @@ class NavimowDevice extends IPSModule
                         $geometryKey
                     );
                     $this->SetValue('LocalMap', $stored['svg']);
+                    $this->publishLocalMapVisualization(
+                        $stored['svg'],
+                        $stored['analytics'],
+                        $status
+                    );
                     $this->writeLocalMapMetadata(
                         $status,
                         $geometryKey,
@@ -239,6 +279,11 @@ class NavimowDevice extends IPSModule
                         $package,
                         $stored['statistics'],
                         null,
+                        true
+                    );
+                    $this->updateMowingAnalyticsVariables(
+                        $package,
+                        $stored['analytics'],
                         true
                     );
                     $this->scheduleLocalMapRefresh();
@@ -316,6 +361,13 @@ class NavimowDevice extends IPSModule
                 $trackState,
                 $geometryKey
             );
+            $analytics = $this->reduceMowingAnalytics(
+                $package,
+                $scene,
+                $geometryKey,
+                $evidence['observedAt']
+            );
+            $scene['analytics'] = $analytics;
             $svg = Navimow\LocalMapSvgRenderer::render($scene, [
                 'stationState' => $this->localMapStationState(),
                 'mowerState' => $this->localMapMowerState(),
@@ -359,10 +411,16 @@ class NavimowDevice extends IPSModule
                 ], JSON_THROW_ON_ERROR)
             );
             $this->SetValue('LocalMap', $svg);
+            $this->publishLocalMapVisualization($svg, $analytics, $status);
             $this->updateZoneStatisticsVariables(
                 $package,
                 $statistics,
                 $evidence['observedAt'],
+                false
+            );
+            $this->updateMowingAnalyticsVariables(
+                $package,
+                $analytics,
                 false
             );
             $this->writeLocalMapMetadata(
@@ -382,11 +440,56 @@ class NavimowDevice extends IPSModule
             ) {
                 $this->SetValue('StatisticsState', 4);
             }
+            if (
+                $this->ReadPropertyBoolean('EnableMowingAnalytics')
+                && $this->variableExists('MowingAnalyticsStatus')
+            ) {
+                $this->SetValue('MowingAnalyticsStatus', 4);
+            }
             $this->scheduleLocalMapRefresh();
             return 'Local map refresh failed.';
         } finally {
             IPS_SemaphoreLeave($lockName);
         }
+    }
+
+    public function GetVisualizationTile(): string
+    {
+        $html = file_get_contents(__DIR__ . '/local-map.html');
+        $style = file_get_contents(__DIR__ . '/local-map.css');
+        $script = file_get_contents(__DIR__ . '/local-map.js');
+        if ($html === false || $style === false || $script === false) {
+            throw new RuntimeException(
+                'Navimow map frontend files are unavailable.'
+            );
+        }
+        $html = str_replace(
+            [
+                '/* SAEF_NAVIMOW_MAP_STYLE */',
+                '/* SAEF_NAVIMOW_MAP_SCRIPT */',
+            ],
+            [$style, $script],
+            $html
+        );
+        $message = $this->ReadAttributeString('LocalMapVisualizationState');
+        if ($message === '' || $message === '{}') {
+            $message = json_encode([
+                'action' => 'configurationError',
+                'message' => 'Local map is not configured.',
+            ], JSON_THROW_ON_ERROR);
+        }
+        return str_replace(
+            '/* SAEF_NAVIMOW_MAP_BOOTSTRAP */',
+            json_encode(
+                $message,
+                JSON_THROW_ON_ERROR
+                | JSON_HEX_TAG
+                | JSON_HEX_AMP
+                | JSON_HEX_APOS
+                | JSON_HEX_QUOT
+            ),
+            $html
+        );
     }
 
     private function refreshStatusInternal(): array
@@ -957,6 +1060,9 @@ class NavimowDevice extends IPSModule
             );
             $this->hiddenZoneSequences();
             $this->localMapTheme();
+            if ($this->ReadPropertyBoolean('EnableMowingAnalytics')) {
+                $this->mowingAnalyticsOptions($package);
+            }
             if (
                 !hash_equals(
                     $geometryKey,
@@ -1286,6 +1392,339 @@ class NavimowDevice extends IPSModule
         }
     }
 
+    private function registerMowingAnalyticsVariables(): void
+    {
+        $this->RegisterVariableInteger(
+            'MowingAnalyticsStatus',
+            'Mowing Analytics Status',
+            'NAVIMOW.MowingAnalyticsState',
+            500
+        );
+        $this->RegisterVariableInteger(
+            'MowingAnalyticsUpdatedAt',
+            'Mowing Analytics Updated At',
+            '~UnixTimestamp',
+            501
+        );
+        $this->RegisterVariableFloat(
+            'LastRunDistance',
+            'Last Run Distance',
+            'NAVIMOW.Distance',
+            502
+        );
+        $this->RegisterVariableInteger(
+            'LastRunDuration',
+            'Last Run Active Duration',
+            'NAVIMOW.Duration',
+            503
+        );
+        $this->RegisterVariableFloat(
+            'LastRunEstimatedArea',
+            'Last Run Estimated Mowed Area',
+            'NAVIMOW.Area',
+            504
+        );
+        $this->RegisterVariableFloat(
+            'LastRunAreaPerformance',
+            'Last Run Estimated Area Performance',
+            'NAVIMOW.AreaPerformance',
+            505
+        );
+
+        try {
+            $definitions = $this->statisticsZoneDefinitions(
+                $this->acceptedLocalMapPackage()
+            );
+        } catch (Throwable) {
+            $this->SetValue('MowingAnalyticsStatus', 4);
+            return;
+        }
+        foreach ($definitions as $index => $definition) {
+            $prefix = 'Zone' . $definition['zoneId'];
+            $name = $definition['label'];
+            $position = 520 + $index * 20;
+            $this->RegisterVariableFloat(
+                $prefix . 'CoverageEstimate',
+                $name . ' - Latest Run Coverage Estimate',
+                'NAVIMOW.Percentage',
+                $position
+            );
+            $this->RegisterVariableFloat(
+                $prefix . 'EstimatedAreaToday',
+                $name . ' - Estimated Area Today',
+                'NAVIMOW.Area',
+                $position + 1
+            );
+            $this->RegisterVariableFloat(
+                $prefix . 'EstimatedAreaWeek',
+                $name . ' - Estimated Area This Week',
+                'NAVIMOW.Area',
+                $position + 2
+            );
+            $this->RegisterVariableFloat(
+                $prefix . 'EstimatedAreaMonth',
+                $name . ' - Estimated Area This Month',
+                'NAVIMOW.Area',
+                $position + 3
+            );
+            $this->RegisterVariableInteger(
+                $prefix . 'LastMowedAt',
+                $name . ' - Last Mowed At',
+                '~UnixTimestamp',
+                $position + 4
+            );
+            $this->RegisterVariableInteger(
+                $prefix . 'MowingRecency',
+                $name . ' - Mowing Recency',
+                'NAVIMOW.MowingRecencyState',
+                $position + 5
+            );
+            $this->RegisterVariableFloat(
+                $prefix . 'LatestRunDistance',
+                $name . ' - Latest Run Distance',
+                'NAVIMOW.Distance',
+                $position + 6
+            );
+            $this->RegisterVariableInteger(
+                $prefix . 'LatestRunDuration',
+                $name . ' - Latest Run Active Duration',
+                'NAVIMOW.Duration',
+                $position + 7
+            );
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $package
+     * @param array<string, mixed> $analytics
+     */
+    private function updateMowingAnalyticsVariables(
+        array $package,
+        array $analytics,
+        bool $stale
+    ): void {
+        if (!$this->ReadPropertyBoolean('EnableMowingAnalytics')) {
+            return;
+        }
+        $this->registerMowingAnalyticsVariables();
+        $zones = $analytics['zones'] ?? null;
+        if (!is_array($zones) || !array_is_list($zones)) {
+            $this->SetValue('MowingAnalyticsStatus', 4);
+            return;
+        }
+        $byKey = [];
+        foreach ($zones as $zone) {
+            if (is_array($zone) && is_string($zone['zoneKey'] ?? null)) {
+                $byKey[$zone['zoneKey']] = $zone;
+            }
+        }
+        foreach ($this->statisticsZoneDefinitions($package) as $definition) {
+            $zone = $byKey[$definition['zoneKey']] ?? null;
+            if (!is_array($zone)) {
+                continue;
+            }
+            $prefix = 'Zone' . $definition['zoneId'];
+            $this->setFloatWhenAvailable(
+                $prefix . 'CoverageEstimate',
+                $zone['latestRunCoveragePercent'] ?? null,
+                1
+            );
+            $this->setFloatWhenAvailable(
+                $prefix . 'EstimatedAreaToday',
+                $zone['todayEstimatedArea'] ?? null,
+                1
+            );
+            $this->setFloatWhenAvailable(
+                $prefix . 'EstimatedAreaWeek',
+                $zone['weekEstimatedArea'] ?? null,
+                1
+            );
+            $this->setFloatWhenAvailable(
+                $prefix . 'EstimatedAreaMonth',
+                $zone['monthEstimatedArea'] ?? null,
+                1
+            );
+            if (is_int($zone['lastMowedAt'] ?? null)) {
+                $this->SetValue(
+                    $prefix . 'LastMowedAt',
+                    $zone['lastMowedAt']
+                );
+            }
+            if (is_int($zone['recencyState'] ?? null)) {
+                $this->SetValue(
+                    $prefix . 'MowingRecency',
+                    $zone['recencyState']
+                );
+            }
+            $run = $zone['latestRun'] ?? null;
+            if (is_array($run)) {
+                $this->setFloatWhenAvailable(
+                    $prefix . 'LatestRunDistance',
+                    $run['distanceMeters'] ?? null,
+                    1
+                );
+                if (is_int($run['activeDurationSeconds'] ?? null)) {
+                    $this->SetValue(
+                        $prefix . 'LatestRunDuration',
+                        $run['activeDurationSeconds']
+                    );
+                }
+            }
+        }
+
+        $latest = $analytics['latestRun'] ?? null;
+        if (is_array($latest)) {
+            $this->setFloatWhenAvailable(
+                'LastRunDistance',
+                $latest['distanceMeters'] ?? null,
+                1
+            );
+            if (is_int($latest['activeDurationSeconds'] ?? null)) {
+                $this->SetValue(
+                    'LastRunDuration',
+                    $latest['activeDurationSeconds']
+                );
+            }
+            $this->setFloatWhenAvailable(
+                'LastRunEstimatedArea',
+                $latest['estimatedArea'] ?? null,
+                1
+            );
+            $this->setFloatWhenAvailable(
+                'LastRunAreaPerformance',
+                $latest['areaPerformanceSquareMetersPerHour'] ?? null,
+                1
+            );
+        }
+        $state = ($analytics['state'] ?? null) === 'available' ? 2 : 1;
+        $this->SetValue('MowingAnalyticsStatus', $stale ? 3 : $state);
+        if (!$stale && is_int($analytics['observedAt'] ?? null)) {
+            $this->SetValue(
+                'MowingAnalyticsUpdatedAt',
+                $analytics['observedAt']
+            );
+        }
+    }
+
+    private function setFloatWhenAvailable(
+        string $ident,
+        mixed $value,
+        int $digits
+    ): void {
+        if (is_int($value) || is_float($value)) {
+            $this->SetValue($ident, round((float) $value, $digits));
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $package
+     *
+     * @return array<string, mixed>
+     */
+    private function mowingAnalyticsOptions(array $package): array
+    {
+        $definitions = [];
+        $zoneBindings = [];
+        foreach ($this->statisticsZoneDefinitions($package) as $definition) {
+            $definitions[$definition['zoneId']] = $definition['zoneKey'];
+            $zoneBindings[] = [
+                'zoneId' => $definition['zoneId'],
+                'zoneKey' => $definition['zoneKey'],
+            ];
+        }
+        $decoded = json_decode(
+            $this->ReadPropertyString('StatisticsSubareas'),
+            true,
+            32,
+            JSON_THROW_ON_ERROR
+        );
+        if (!is_array($decoded) || !array_is_list($decoded)) {
+            throw new RuntimeException('Statistics subareas are invalid.');
+        }
+        $subareas = [];
+        foreach ($decoded as $subarea) {
+            if (
+                !is_array($subarea)
+                || !is_int($subarea['zoneId'] ?? null)
+                || !isset($definitions[$subarea['zoneId']])
+            ) {
+                throw new RuntimeException(
+                    'Statistics subarea zone is invalid.'
+                );
+            }
+            $subareas[] = [
+                'key' => $subarea['key'] ?? null,
+                'zoneKey' => $definitions[$subarea['zoneId']],
+                'label' => $subarea['label'] ?? null,
+                'ring' => $subarea['ring'] ?? null,
+            ];
+        }
+        return [
+            'timeZone' => $this->ReadPropertyString('StatisticsTimeZone'),
+            'metersPerLocalUnit' =>
+                $this->ReadPropertyFloat('MetersPerLocalUnit'),
+            'cuttingWidthMeters' =>
+                $this->ReadPropertyFloat('CuttingWidthMeters'),
+            'coverageCellSizeMeters' =>
+                $this->ReadPropertyFloat('CoverageCellSizeMeters'),
+            'recencyWarningDays' =>
+                $this->ReadPropertyInteger('MowingRecencyWarningDays'),
+            'recencyCriticalDays' =>
+                $this->ReadPropertyInteger('MowingRecencyCriticalDays'),
+            'zoneBindings' => $zoneBindings,
+            'subareas' => $subareas,
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $package
+     * @param array<string, mixed> $scene
+     *
+     * @return array<string, mixed>
+     */
+    private function reduceMowingAnalytics(
+        array $package,
+        array $scene,
+        string $geometryKey,
+        int $observedAt
+    ): array {
+        if (!$this->ReadPropertyBoolean('EnableMowingAnalytics')) {
+            return Navimow\MowingAnalyticsReducer::project(
+                Navimow\MowingAnalyticsReducer::initialState(),
+                $geometryKey,
+                $this->currentTimestamp()
+            );
+        }
+        $options = $this->mowingAnalyticsOptions($package);
+        $state = $this->restoreMowingAnalyticsState();
+        $state = Navimow\MowingAnalyticsReducer::update(
+            $state,
+            $scene,
+            $observedAt,
+            $options
+        );
+        $this->WriteAttributeString(
+            'MowingAnalyticsState',
+            Navimow\MowingAnalyticsReducer::serializeState($state)
+        );
+        return Navimow\MowingAnalyticsReducer::project(
+            $state,
+            $geometryKey,
+            $this->currentTimestamp(),
+            $options
+        );
+    }
+
+    /** @return array<string, mixed> */
+    private function restoreMowingAnalyticsState(): array
+    {
+        $encoded = $this->ReadAttributeString('MowingAnalyticsState');
+        if ($encoded === '' || $encoded === '{}') {
+            return Navimow\MowingAnalyticsReducer::initialState();
+        }
+        return Navimow\MowingAnalyticsReducer::restoreState($encoded);
+    }
+
     private function variableExists(string $ident): bool
     {
         try {
@@ -1346,7 +1785,7 @@ class NavimowDevice extends IPSModule
     /**
      * @param array<string, mixed> $package
      *
-     * @return array{svg: string, segmentCount: int, pointCount: int, statistics: array<string, mixed>}
+     * @return array{svg: string, segmentCount: int, pointCount: int, statistics: array<string, mixed>, analytics: array<string, mixed>}
      */
     private function renderStoredLocalMap(
         array $package,
@@ -1372,6 +1811,21 @@ class NavimowDevice extends IPSModule
             $state,
             $geometryKey
         );
+        if ($this->ReadPropertyBoolean('EnableMowingAnalytics')) {
+            $analytics = Navimow\MowingAnalyticsReducer::project(
+                $this->restoreMowingAnalyticsState(),
+                $geometryKey,
+                $this->currentTimestamp(),
+                $this->mowingAnalyticsOptions($package)
+            );
+        } else {
+            $analytics = Navimow\MowingAnalyticsReducer::project(
+                Navimow\MowingAnalyticsReducer::initialState(),
+                $geometryKey,
+                $this->currentTimestamp()
+            );
+        }
+        $scene['analytics'] = $analytics;
 
         return [
             'svg' => Navimow\LocalMapSvgRenderer::render($scene, [
@@ -1385,6 +1839,7 @@ class NavimowDevice extends IPSModule
             'segmentCount' => $projection['segmentCount'],
             'pointCount' => $projection['pointCount'],
             'statistics' => $statistics,
+            'analytics' => $analytics,
         ];
     }
 
@@ -1542,6 +1997,39 @@ class NavimowDevice extends IPSModule
                 JSON_THROW_ON_ERROR
             )
         );
+    }
+
+    /** @param array<string, mixed> $analytics */
+    private function publishLocalMapVisualization(
+        string $svg,
+        array $analytics,
+        string $status
+    ): void {
+        $encoded = json_encode([
+            'action' => 'render',
+            'status' => substr($status, 0, 32),
+            'theme' => $this->localMapTheme(),
+            'updatedAt' => $this->currentTimestamp(),
+            'svg' => $svg,
+            'analytics' => $analytics,
+        ], JSON_THROW_ON_ERROR | JSON_PRESERVE_ZERO_FRACTION);
+        if (strlen($encoded) > self::LOCAL_MAP_VISUALIZATION_MAX_BYTES) {
+            throw new RuntimeException(
+                'Local map visualization exceeds the byte limit.'
+            );
+        }
+        $this->WriteAttributeString('LocalMapVisualizationState', $encoded);
+        $this->UpdateVisualizationValue($encoded);
+    }
+
+    private function publishLocalMapVisualizationError(string $message): void
+    {
+        $encoded = json_encode([
+            'action' => 'configurationError',
+            'message' => substr($message, 0, 160),
+        ], JSON_THROW_ON_ERROR);
+        $this->WriteAttributeString('LocalMapVisualizationState', $encoded);
+        $this->UpdateVisualizationValue($encoded);
     }
 
     private function setLocalMapHidden(bool $hidden): void

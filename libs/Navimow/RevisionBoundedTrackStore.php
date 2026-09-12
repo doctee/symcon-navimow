@@ -119,6 +119,15 @@ final class RevisionBoundedTrackStore
                     64
                 ),
                 'taskZoneKey' => $taskZoneKey,
+                'passSequence' => self::optionalSequence(
+                    $sourceSegment['passSequence'] ?? null
+                ),
+                'sessionSequence' => self::optionalSequence(
+                    $sourceSegment['sessionSequence'] ?? null
+                ),
+                'vehicleStateCode' => self::sequence(
+                    $sourceSegment['vehicleStateCode'] ?? 0
+                ),
                 'startedAt' => $retained[0]['receivedAt'],
                 'endedAt' => $retained[array_key_last($retained)]['receivedAt'],
                 'points' => $retained,
@@ -259,7 +268,9 @@ final class RevisionBoundedTrackStore
                     'localX' => $point['localX'],
                     'localY' => $point['localY'],
                     'orientation' => $point['orientation'],
+                    'sourceTimestamp' => $point['sourceTimestamp'],
                     'receivedAt' => $point['receivedAt'],
+                    'vehicleStateCode' => $point['vehicleStateCode'],
                     'attribution' => [
                         'source' => $source,
                         'zoneKey' => $point['zoneKey'],
@@ -270,6 +281,11 @@ final class RevisionBoundedTrackStore
             }
             $segments[] = [
                 'sequence' => count($segments) + 1,
+                'passSequence' => $segment['passSequence'],
+                'sessionSequence' => $segment['sessionSequence'],
+                'vehicleStateCode' => $segment['vehicleStateCode'],
+                'startedAt' => $segment['startedAt'],
+                'endedAt' => $segment['endedAt'],
                 'breakReason' => $segment['breakReason'],
                 'taskZoneKey' => $segment['taskZoneKey'],
                 'points' => $points,
@@ -292,6 +308,7 @@ final class RevisionBoundedTrackStore
     {
         $state = self::state($state);
         $revisions = [];
+        $normalizedSegments = [];
         foreach ($state['segments'] as $segment) {
             $key = $segment['geometryKey'];
             $revisions[$key] ??= [
@@ -349,6 +366,7 @@ final class RevisionBoundedTrackStore
             throw new InvalidArgumentException('Track state is invalid.');
         }
         $pointCount = 0;
+        $normalizedSegments = [];
         foreach ($state['segments'] as $segment) {
             if (
                 !is_array($segment)
@@ -372,6 +390,20 @@ final class RevisionBoundedTrackStore
             foreach ($segment['points'] as $point) {
                 self::retainedPoint($point);
             }
+            $segment['passSequence'] = self::optionalSequence(
+                $segment['passSequence'] ?? null
+            );
+            $segment['sessionSequence'] = self::optionalSequence(
+                $segment['sessionSequence'] ?? null
+            );
+            $segment['vehicleStateCode'] = self::sequence(
+                $segment['vehicleStateCode'] ?? 0
+            );
+            $segment['points'] = array_map(
+                [self::class, 'retainedPoint'],
+                $segment['points']
+            );
+            $normalizedSegments[] = $segment;
         }
         if ($pointCount > self::MAX_POINTS) {
             throw new InvalidArgumentException(
@@ -397,6 +429,7 @@ final class RevisionBoundedTrackStore
             }
         }
 
+        $state['segments'] = $normalizedSegments;
         return $state;
     }
 
@@ -427,7 +460,14 @@ final class RevisionBoundedTrackStore
             'localX' => self::finite($point['localX'] ?? null),
             'localY' => self::finite($point['localY'] ?? null),
             'orientation' => self::finite($point['orientation'] ?? null),
+            'sourceTimestamp' => is_int($point['sourceTimestamp'] ?? null)
+                && $point['sourceTimestamp'] > 0
+                    ? $point['sourceTimestamp']
+                    : $point['receivedAt'],
             'receivedAt' => $point['receivedAt'],
+            'vehicleStateCode' => self::sequence(
+                $point['vehicleStateCode'] ?? 0
+            ),
             'zoneKey' => $zoneKey,
             'attributionSource' => self::boundedText(
                 $attribution['source'] ?? null,
@@ -463,7 +503,14 @@ final class RevisionBoundedTrackStore
             'localX' => self::finite($point['localX'] ?? null),
             'localY' => self::finite($point['localY'] ?? null),
             'orientation' => self::finite($point['orientation'] ?? null),
+            'sourceTimestamp' => is_int($point['sourceTimestamp'] ?? null)
+                && $point['sourceTimestamp'] > 0
+                    ? $point['sourceTimestamp']
+                    : $point['receivedAt'],
             'receivedAt' => $point['receivedAt'],
+            'vehicleStateCode' => self::sequence(
+                $point['vehicleStateCode'] ?? 0
+            ),
             'zoneKey' => $zoneKey,
             'attributionSource' => self::boundedText(
                 $point['attributionSource'] ?? null,
@@ -617,5 +664,20 @@ final class RevisionBoundedTrackStore
         }
 
         return $value;
+    }
+
+    private static function sequence(mixed $value): int
+    {
+        if (!is_int($value) || $value < 0) {
+            throw new InvalidArgumentException(
+                'Track sequence is invalid.'
+            );
+        }
+        return $value;
+    }
+
+    private static function optionalSequence(mixed $value): ?int
+    {
+        return $value === null ? null : self::sequence($value);
     }
 }

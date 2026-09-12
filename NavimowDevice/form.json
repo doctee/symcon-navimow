@@ -26,6 +26,11 @@
       "caption": "Expose revision-bound zone statistics"
     },
     {
+      "type": "CheckBox",
+      "name": "EnableMowingAnalytics",
+      "caption": "Expose retained mowing analytics"
+    },
+    {
       "type": "ValidationTextBox",
       "name": "AcceptedGeometryKey",
       "caption": "Accepted map revision"
@@ -77,6 +82,58 @@
       "suffix": " seconds",
       "minimum": 60,
       "maximum": 3600
+    },
+    {
+      "type": "ValidationTextBox",
+      "name": "StatisticsTimeZone",
+      "caption": "Statistics time zone"
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "MetersPerLocalUnit",
+      "caption": "Meters per local coordinate unit",
+      "digits": 3,
+      "minimum": 0.001,
+      "maximum": 1000
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "CuttingWidthMeters",
+      "caption": "Cutting width for diagnostic coverage",
+      "suffix": " m",
+      "digits": 2,
+      "minimum": 0,
+      "maximum": 10
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "CoverageCellSizeMeters",
+      "caption": "Coverage grid cell size",
+      "suffix": " m",
+      "digits": 2,
+      "minimum": 0.01,
+      "maximum": 5
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "MowingRecencyWarningDays",
+      "caption": "Mowing due after",
+      "suffix": " days",
+      "minimum": 1,
+      "maximum": 365
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "MowingRecencyCriticalDays",
+      "caption": "Mowing overdue after",
+      "suffix": " days",
+      "minimum": 2,
+      "maximum": 730
+    },
+    {
+      "type": "ValidationTextBox",
+      "name": "StatisticsSubareas",
+      "caption": "Optional revision-bound statistics subareas"
     }
   ],
   "actions": [

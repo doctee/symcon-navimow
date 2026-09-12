@@ -53,6 +53,19 @@ final class LocalMapSvgRenderer
         }
         $presentation = self::options($options);
         $viewport = self::viewport($scene['viewport']);
+        $analyticsByKey = [];
+        $analytics = $scene['analytics'] ?? null;
+        if (is_array($analytics) && is_array($analytics['zones'] ?? null)) {
+            foreach ($analytics['zones'] as $zoneAnalytics) {
+                if (
+                    is_array($zoneAnalytics)
+                    && is_string($zoneAnalytics['zoneKey'] ?? null)
+                ) {
+                    $analyticsByKey[$zoneAnalytics['zoneKey']] =
+                        $zoneAnalytics;
+                }
+            }
+        }
         $pointCount = 0;
         $zoneMarkup = [];
         $labelMarkup = [];
@@ -66,12 +79,30 @@ final class LocalMapSvgRenderer
                 ? self::DARK_COLORS
                 : self::LIGHT_COLORS;
             $color = $colors[$index % count($colors)];
+            $zoneId = is_int($zone['zoneId'] ?? null)
+                ? $zone['zoneId']
+                : $index + 1;
+            $zoneAnalytics = is_string($zone['zoneKey'] ?? null)
+                ? ($analyticsByKey[$zone['zoneKey']] ?? null)
+                : null;
+            $recency = is_array($zoneAnalytics)
+                && is_int($zoneAnalytics['recencyState'] ?? null)
+                    ? $zoneAnalytics['recencyState']
+                    : 0;
+            $recencyClass = match ($recency) {
+                2 => ' zone-recency-warning',
+                3 => ' zone-recency-critical',
+                default => '',
+            };
             $zoneMarkup[] = sprintf(
-                '<polygon class="zone" data-zone-sequence="%d" points="%s" fill="%s" stroke="%s"/>',
+                '<polygon class="zone%s" data-zone-id="%d" data-zone-sequence="%d" points="%s" fill="%s" stroke="%s"><title>%s</title></polygon>',
+                $recencyClass,
+                $zoneId,
                 $index + 1,
                 self::points($ring, $viewport),
                 $color['fill'],
-                $color['stroke']
+                $color['stroke'],
+                self::escape(self::zoneTitle($label, $zoneAnalytics))
             );
             if (
                 !in_array(
@@ -84,7 +115,8 @@ final class LocalMapSvgRenderer
                 $projected = self::project($center, $viewport);
                 $suffix = self::progressSuffix($zone['statistics'] ?? null);
                 $labelMarkup[] = sprintf(
-                    '<text class="zone-label" x="%s" y="%s">%s%s</text>',
+                    '<text class="zone-label" data-zone-id="%d" x="%s" y="%s">%s%s</text>',
+                    $zoneId,
                     self::number($projected[0]),
                     self::number($projected[1]),
                     self::escape($label),
@@ -225,8 +257,8 @@ final class LocalMapSvgRenderer
             ], $viewport);
             $direction = $scene['station']['direction'] ?? null;
             $rotation = $direction === null
-                ? 0.0
-                : -rad2deg(self::finite($direction));
+                ? -8.0
+                : -rad2deg(self::finite($direction)) - 8.0;
             $stationState = $presentation['stationState'];
             $stationMarkup = sprintf(
                 '<g class="station station-%s" transform="translate(%s %s) rotate(%s)"><title>%s</title>%s</g>',
@@ -276,8 +308,13 @@ final class LocalMapSvgRenderer
             ]
         ));
         $svg = sprintf(
-            '<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Local mower map" data-theme="%s" viewBox="%s" width="100%%" height="100%%" style="display:block" preserveAspectRatio="xMidYMid meet"><style>%s</style><rect class="background" x="%s" y="%s" width="%s" height="%s"/>%s%s%s%s%s%s%s</svg>',
+            '<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Local mower map" data-theme="%s" data-geometry-key="%s" viewBox="%s" width="100%%" height="100%%" style="display:block" preserveAspectRatio="xMidYMid meet"><style>%s</style><rect class="background" x="%s" y="%s" width="%s" height="%s"/>%s%s%s%s%s%s%s</svg>',
             self::escape($presentation['theme']),
+            self::escape(
+                is_string($scene['revision']['geometryKey'] ?? null)
+                    ? $scene['revision']['geometryKey']
+                    : ''
+            ),
             $viewBox,
             self::styles($viewport, $presentation['theme']),
             self::number($viewport['minimumX']),
@@ -680,6 +717,7 @@ final class LocalMapSvgRenderer
                 '.zone{fill-opacity:.62;stroke-width:%s;vector-effect:non-scaling-stroke}',
                 $strokeWidth
             ),
+            '.zone-recency-warning{stroke:#ffd166!important;stroke-width:1.25!important;stroke-dasharray:2.2 1.1}.zone-recency-critical{stroke:#ff5964!important;stroke-width:1.55!important;stroke-dasharray:1.4 .8}',
             sprintf(
                 '.obstacle{fill:%s;fill-opacity:.06;stroke:%s;stroke-width:%s;stroke-dasharray:1.1 .8;vector-effect:non-scaling-stroke}',
                 $palette['obstacleFill'],
@@ -845,6 +883,19 @@ final class LocalMapSvgRenderer
                 'Station state is invalid.'
             ),
         };
+    }
+
+    /** @param array<string, mixed>|null $analytics */
+    private static function zoneTitle(string $label, ?array $analytics): string
+    {
+        if ($analytics === null) {
+            return $label;
+        }
+        $days = $analytics['recencyDays'] ?? null;
+        if (!is_int($days)) {
+            return $label . '; no mowing history';
+        }
+        return $label . '; last mowed ' . $days . ' days ago';
     }
 
     private static function mowerTitle(

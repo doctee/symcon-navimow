@@ -10,6 +10,8 @@ use LogicException;
 
 final class LocalMapSceneProjector
 {
+    private const STATION_SAFETY_RADIUS_LOCAL = 3.2;
+    private const MOWER_SAFETY_RADIUS_LOCAL = 2.6;
     private const HASH_PATTERN = '/^[a-f0-9]{64}$/D';
     private const MAX_ZONES = 32;
     private const MAX_AREAS = 256;
@@ -91,6 +93,7 @@ final class LocalMapSceneProjector
                 ) <= 0.000001;
 
             $zoneLayer[] = [
+                'zoneId' => $zone['id'],
                 'sequence' => $zone['sequence'],
                 'zoneKey' => $zone['zoneKey'],
                 'label' => $zone['label'],
@@ -140,7 +143,8 @@ final class LocalMapSceneProjector
             'contracts' => [
                 'taskZoneAttributionPrecedesGeometry' => true,
                 'ambiguousGeometryNeverDoubleCounts' => true,
-                'geometricCoveragePercent' => 'not-implemented',
+                'geometricCoveragePercent' =>
+                    'separate-diagnostic-reducer',
                 'revisionMismatchDropsPathAndStatistics' => true,
             ],
         ];
@@ -442,6 +446,22 @@ final class LocalMapSceneProjector
                 self::finiteNumber($point['localY'] ?? null);
                 self::finiteNumber($point['orientation'] ?? null);
             }
+            foreach (['passSequence', 'sessionSequence'] as $field) {
+                $value = $segment[$field] ?? null;
+                if ($value !== null && (!is_int($value) || $value < 0)) {
+                    throw new InvalidArgumentException(
+                        'Path segment sequence is invalid.'
+                    );
+                }
+            }
+            if (
+                !is_int($segment['vehicleStateCode'] ?? null)
+                || $segment['vehicleStateCode'] < 0
+            ) {
+                throw new InvalidArgumentException(
+                    'Path segment vehicle state is invalid.'
+                );
+            }
         }
 
         return $path;
@@ -624,12 +644,34 @@ final class LocalMapSceneProjector
                     'localX' => $local[0],
                     'localY' => $local[1],
                     'orientation' => (float) $point['orientation'],
+                    'sourceTimestamp' => is_int(
+                        $point['sourceTimestamp'] ?? null
+                    ) ? $point['sourceTimestamp'] : $point['receivedAt'],
                     'receivedAt' => $point['receivedAt'],
+                    'vehicleStateCode' => is_int(
+                        $point['vehicleStateCode'] ?? null
+                    ) ? $point['vehicleStateCode'] : (
+                        is_int($segment['vehicleStateCode'] ?? null)
+                            ? $segment['vehicleStateCode']
+                            : 0
+                    ),
                     'attribution' => $attribution,
                 ];
             }
             $segments[] = [
                 'sequence' => $segment['sequence'] ?? count($segments) + 1,
+                'passSequence' => $segment['passSequence'] ?? null,
+                'sessionSequence' => $segment['sessionSequence'] ?? null,
+                'vehicleStateCode' => $segment['vehicleStateCode'] ?? 0,
+                'startedAt' => $segment['startedAt']
+                    ?? ($points[0]['receivedAt'] ?? null),
+                'endedAt' => $segment['endedAt']
+                    ?? ($points[array_key_last($points)]['receivedAt'] ?? null),
+                'pathLengthLocal' => is_int(
+                    $segment['pathLengthLocal'] ?? null
+                ) || is_float($segment['pathLengthLocal'] ?? null)
+                    ? (float) $segment['pathLengthLocal']
+                    : 0.0,
                 'breakReason' => $segment['breakReason'] ?? 'unknown',
                 'taskZoneKey' => $areaKey,
                 'points' => $points,
@@ -753,12 +795,27 @@ final class LocalMapSceneProjector
             array_push($points, ...$obstacle['ring']);
         }
         if ($station !== null) {
-            $points[] = [$station['x'], $station['y']];
+            self::addSafetyExtent(
+                $points,
+                $station['x'],
+                $station['y'],
+                self::STATION_SAFETY_RADIUS_LOCAL
+            );
         }
+        $latest = null;
         foreach ($segments as $segment) {
             foreach ($segment['points'] as $point) {
                 $points[] = [$point['localX'], $point['localY']];
+                $latest = [$point['localX'], $point['localY']];
             }
+        }
+        if ($latest !== null) {
+            self::addSafetyExtent(
+                $points,
+                $latest[0],
+                $latest[1],
+                self::MOWER_SAFETY_RADIUS_LOCAL
+            );
         }
         $xs = array_column($points, 0);
         $ys = array_column($points, 1);
@@ -767,7 +824,7 @@ final class LocalMapSceneProjector
         $minimumY = min($ys);
         $maximumY = max($ys);
         $span = max($maximumX - $minimumX, $maximumY - $minimumY);
-        $padding = max(0.75, $span * 0.03);
+        $padding = max(0.25, $span * 0.01);
 
         return [
             'minimumX' => $minimumX - $padding,
@@ -778,6 +835,19 @@ final class LocalMapSceneProjector
             'height' => ($maximumY - $minimumY) + 2.0 * $padding,
             'paddingLocal' => $padding,
         ];
+    }
+
+    /**
+     * @param list<array{0: float, 1: float}> $points
+     */
+    private static function addSafetyExtent(
+        array &$points,
+        float $x,
+        float $y,
+        float $radius
+    ): void {
+        $points[] = [$x - $radius, $y - $radius];
+        $points[] = [$x + $radius, $y + $radius];
     }
 
     /**
