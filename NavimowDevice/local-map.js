@@ -9,7 +9,6 @@
     const stage = root.querySelector('[data-map-stage]');
     const status = root.querySelector('[data-status]');
     const statistics = root.querySelector('[data-statistics]');
-    const zoneSelect = root.querySelector('[data-zone]');
     const followButton = root.querySelector('[data-follow]');
     const pointers = new Map();
     const viewportEdgeInset = 6;
@@ -182,24 +181,6 @@
         }
     }
 
-    function focusElement(element, paddingFactor)
-    {
-        if (!state.svg || !element) {
-            return;
-        }
-        const box = element.getBBox();
-        if (!(box.width > 0 && box.height > 0)) {
-            return;
-        }
-        const padding = Math.max(box.width, box.height) * paddingFactor;
-        applyViewBox([
-            box.x - padding,
-            box.y - padding,
-            box.width + 2 * padding,
-            box.height + 2 * padding,
-        ]);
-    }
-
     function focusMower()
     {
         const mower = state.svg ? state.svg.querySelector('.mower') : null;
@@ -239,85 +220,83 @@
     function recencyText(zone)
     {
         if (!Number.isInteger(zone.recencyDays)) {
-            return 'noch ohne Verlauf';
+            return 'Stand –';
         }
         if (zone.recencyDays === 0) {
-            return 'heute gemäht';
+            return 'Stand heute';
         }
-        return 'vor ' + zone.recencyDays + ' Tagen';
+        return 'Stand ' + zone.recencyDays + ' T.';
+    }
+
+    function zonePresentation(zone, index)
+    {
+        const zoneId = zone.zoneId === undefined || zone.zoneId === null
+            ? ''
+            : String(zone.zoneId);
+        const element = state.svg && zoneId !== ''
+            ? state.svg.querySelector(
+                '.zone[data-zone-id="' + CSS.escape(zoneId) + '"]'
+            )
+            : null;
+        if (!element) {
+            return {
+                zone,
+                index,
+                centerX: Number.POSITIVE_INFINITY,
+                color: '',
+                label: zone.label,
+            };
+        }
+        const box = element.getBBox();
+        const title = element.querySelector('title');
+        return {
+            zone,
+            index,
+            centerX: box.x + box.width / 2,
+            color: element.getAttribute('stroke') || '',
+            label: title ? title.textContent.split(';', 1)[0] : zone.label,
+        };
     }
 
     function renderStatistics(zones)
     {
         statistics.replaceChildren();
         const entries = Array.isArray(zones) ? zones : [];
-        entries.forEach(function (zone) {
-            const row = document.createElement('div');
-            row.className = 'nav-map__zone-stat';
-            row.dataset.recency = String(zone.recencyState || 0);
-            const title = document.createElement('strong');
-            title.textContent = zone.label;
-            const recency = document.createElement('span');
-            recency.textContent = recencyText(zone);
-            const coverage = document.createElement('span');
-            coverage.textContent = Number.isFinite(zone.latestRunCoveragePercent)
-                ? 'Abdeckung ' + formatPercent(zone.latestRunCoveragePercent)
-                : (Number.isFinite(zone.passProgressPercent)
-                    ? 'Fortschritt ' + formatPercent(zone.passProgressPercent)
-                    : 'Noch keine Laufdaten');
-            const week = document.createElement('span');
-            week.textContent = Number.isFinite(zone.weekEstimatedArea)
-                ? 'Woche ' + formatArea(zone.weekEstimatedArea)
-                : (Number.isFinite(zone.observedArea)
-                    ? 'Beobachtet ' + formatArea(zone.observedArea)
-                    : 'Fläche noch offen');
-            row.append(title, recency, coverage, week);
-            statistics.append(row);
-        });
-        scheduleStatisticsLayout();
-    }
-
-    function zoneEntries(analytics)
-    {
-        if (analytics && Array.isArray(analytics.zones)
-            && analytics.zones.length > 0) {
-            return analytics.zones.map(function (zone) {
-                return {zoneId: zone.zoneId, label: zone.label};
-            });
-        }
-        if (!state.svg) {
-            return [];
-        }
-        return [...state.svg.querySelectorAll('.zone[data-zone-id]')]
-            .map(function (zone) {
-                const title = zone.querySelector('title');
-                return {
-                    zoneId: zone.dataset.zoneId,
-                    label: title ? title.textContent.split(';', 1)[0] : '',
-                };
+        entries.map(zonePresentation)
+            .sort(function (left, right) {
+                return left.centerX - right.centerX || left.index - right.index;
             })
-            .filter(function (zone) {
-                return zone.zoneId !== '' && zone.label !== '';
+            .forEach(function (entry) {
+                const zone = entry.zone;
+                const row = document.createElement('div');
+                row.className = 'nav-map__zone-stat';
+                row.dataset.zoneId = String(zone.zoneId === undefined || zone.zoneId === null ? '' : zone.zoneId);
+                row.dataset.recency = String(zone.recencyState || 0);
+                if (entry.color !== '') {
+                    row.style.setProperty('--nav-zone-color', entry.color);
+                }
+                const title = document.createElement('strong');
+                title.textContent = entry.label;
+                const recency = document.createElement('span');
+                recency.textContent = recencyText(zone);
+                const coverage = document.createElement('span');
+                coverage.textContent = Number.isFinite(
+                    zone.latestRunCoveragePercent
+                )
+                    ? 'Lauf ' + formatPercent(zone.latestRunCoveragePercent)
+                    : (Number.isFinite(zone.passProgressPercent)
+                        ? 'Lauf ' + formatPercent(zone.passProgressPercent)
+                        : 'Lauf –');
+                const week = document.createElement('span');
+                week.textContent = Number.isFinite(zone.weekEstimatedArea)
+                    ? 'Woche ' + formatArea(zone.weekEstimatedArea)
+                    : (Number.isFinite(zone.observedArea)
+                        ? 'Fläche ' + formatArea(zone.observedArea)
+                        : 'Fläche –');
+                row.append(title, recency, coverage, week);
+                statistics.append(row);
             });
-    }
-
-    function populateZones(analytics)
-    {
-        const selected = zoneSelect.value;
-        zoneSelect.replaceChildren();
-        const all = document.createElement('option');
-        all.value = '';
-        all.textContent = 'Alle Zonen';
-        zoneSelect.append(all);
-        zoneEntries(analytics).forEach(function (zone) {
-            const option = document.createElement('option');
-            option.value = String(zone.zoneId);
-            option.textContent = zone.label;
-            zoneSelect.append(option);
-        });
-        if ([...zoneSelect.options].some((option) => option.value === selected)) {
-            zoneSelect.value = selected;
-        }
+        scheduleStatisticsLayout();
     }
 
     function render(payload)
@@ -337,7 +316,6 @@
         state.fitViewBox = parseViewBox(state.svg);
         state.geometryKey = payload.analytics ? payload.analytics.geometryKey : null;
         applyViewBox(sameGeometry && previous ? previous : [...state.fitViewBox]);
-        populateZones(payload.analytics);
         renderStatistics(
             Array.isArray(payload.statistics)
                 ? payload.statistics
@@ -469,18 +447,6 @@
             focusMower();
         }
     });
-    zoneSelect.addEventListener('change', function () {
-        state.following = false;
-        followButton.setAttribute('aria-pressed', 'false');
-        if (zoneSelect.value === '') {
-            fit();
-            return;
-        }
-        const selector = '.zone[data-zone-id="'
-            + CSS.escape(zoneSelect.value) + '"]';
-        focusElement(state.svg ? state.svg.querySelector(selector) : null, 0.12);
-    });
-
     window.handleMessage = handleMessage;
     window.addEventListener('resize', function () {
         scheduleStatisticsLayout();
