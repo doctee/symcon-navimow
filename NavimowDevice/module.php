@@ -267,7 +267,8 @@ class NavimowDevice extends IPSModule
                     $this->publishLocalMapVisualization(
                         $stored['svg'],
                         $stored['analytics'],
-                        $status
+                        $status,
+                        $stored['visualizationStatistics']
                     );
                     $this->writeLocalMapMetadata(
                         $status,
@@ -368,6 +369,8 @@ class NavimowDevice extends IPSModule
                 $evidence['observedAt']
             );
             $scene['analytics'] = $analytics;
+            $visualizationStatistics =
+                $this->localMapVisualizationStatistics($scene, $analytics);
             $svg = Navimow\LocalMapSvgRenderer::render($scene, [
                 'stationState' => $this->localMapStationState(),
                 'mowerState' => $this->localMapMowerState(),
@@ -411,7 +414,12 @@ class NavimowDevice extends IPSModule
                 ], JSON_THROW_ON_ERROR)
             );
             $this->SetValue('LocalMap', $svg);
-            $this->publishLocalMapVisualization($svg, $analytics, $status);
+            $this->publishLocalMapVisualization(
+                $svg,
+                $analytics,
+                $status,
+                $visualizationStatistics
+            );
             $this->updateZoneStatisticsVariables(
                 $package,
                 $statistics,
@@ -1785,7 +1793,7 @@ class NavimowDevice extends IPSModule
     /**
      * @param array<string, mixed> $package
      *
-     * @return array{svg: string, segmentCount: int, pointCount: int, statistics: array<string, mixed>, analytics: array<string, mixed>}
+     * @return array{svg: string, segmentCount: int, pointCount: int, statistics: array<string, mixed>, analytics: array<string, mixed>, visualizationStatistics: list<array<string, mixed>>}
      */
     private function renderStoredLocalMap(
         array $package,
@@ -1826,6 +1834,8 @@ class NavimowDevice extends IPSModule
             );
         }
         $scene['analytics'] = $analytics;
+        $visualizationStatistics =
+            $this->localMapVisualizationStatistics($scene, $analytics);
 
         return [
             'svg' => Navimow\LocalMapSvgRenderer::render($scene, [
@@ -1840,6 +1850,7 @@ class NavimowDevice extends IPSModule
             'pointCount' => $projection['pointCount'],
             'statistics' => $statistics,
             'analytics' => $analytics,
+            'visualizationStatistics' => $visualizationStatistics,
         ];
     }
 
@@ -1999,11 +2010,72 @@ class NavimowDevice extends IPSModule
         );
     }
 
-    /** @param array<string, mixed> $analytics */
+    /**
+     * @param array<string, mixed> $scene
+     * @param array<string, mixed> $analytics
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function localMapVisualizationStatistics(
+        array $scene,
+        array $analytics
+    ): array {
+        $analyticsByKey = [];
+        $analyticsZones = $analytics['zones'] ?? null;
+        if (is_array($analyticsZones) && array_is_list($analyticsZones)) {
+            foreach ($analyticsZones as $zone) {
+                if (is_array($zone) && is_string($zone['zoneKey'] ?? null)) {
+                    $analyticsByKey[$zone['zoneKey']] = $zone;
+                }
+            }
+        }
+
+        $result = [];
+        $zones = $scene['zones'] ?? null;
+        if (!is_array($zones) || !array_is_list($zones)) {
+            return $result;
+        }
+        foreach ($zones as $zone) {
+            if (
+                !is_array($zone)
+                || !is_int($zone['zoneId'] ?? null)
+                || !is_string($zone['zoneKey'] ?? null)
+                || !is_string($zone['label'] ?? null)
+            ) {
+                continue;
+            }
+            $latestPass = is_array($zone['statistics'] ?? null)
+                && is_array($zone['statistics']['latestPass'] ?? null)
+                    ? $zone['statistics']['latestPass']
+                    : [];
+            $zoneAnalytics = $analyticsByKey[$zone['zoneKey']] ?? [];
+            $result[] = [
+                'zoneId' => $zone['zoneId'],
+                'label' => $zone['label'],
+                'passProgressPercent' =>
+                    $latestPass['passProgressPercent'] ?? null,
+                'observedArea' => $latestPass['observedAreaDelta'] ?? null,
+                'recencyDays' => $zoneAnalytics['recencyDays'] ?? null,
+                'recencyState' => $zoneAnalytics['recencyState'] ?? 0,
+                'latestRunCoveragePercent' =>
+                    $zoneAnalytics['latestRunCoveragePercent'] ?? null,
+                'weekEstimatedArea' =>
+                    $zoneAnalytics['weekEstimatedArea'] ?? null,
+            ];
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param array<string, mixed> $analytics
+     * @param list<array<string, mixed>> $visualizationStatistics
+     */
     private function publishLocalMapVisualization(
         string $svg,
         array $analytics,
-        string $status
+        string $status,
+        array $visualizationStatistics
     ): void {
         $encoded = json_encode([
             'action' => 'render',
@@ -2012,6 +2084,7 @@ class NavimowDevice extends IPSModule
             'updatedAt' => $this->currentTimestamp(),
             'svg' => $svg,
             'analytics' => $analytics,
+            'statistics' => $visualizationStatistics,
         ], JSON_THROW_ON_ERROR | JSON_PRESERVE_ZERO_FRACTION);
         if (strlen($encoded) > self::LOCAL_MAP_VISUALIZATION_MAX_BYTES) {
             throw new RuntimeException(

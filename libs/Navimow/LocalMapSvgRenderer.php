@@ -162,8 +162,10 @@ final class LocalMapSvgRenderer
         ) {
             throw new InvalidArgumentException('Map path is invalid.');
         }
+        [$oldestPathAt, $newestPathAt] = self::pathTimeRange($segments);
         $latest = null;
         $previousLatest = null;
+        $latestReceivedAt = null;
         foreach ($segments as $index => $segment) {
             if (!is_array($segment)) {
                 throw new InvalidArgumentException(
@@ -177,6 +179,9 @@ final class LocalMapSvgRenderer
                 );
             }
             $points = [];
+            $pathRuns = [];
+            $runStep = null;
+            $runPoints = [];
             foreach ($values as $value) {
                 if (!is_array($value)) {
                     throw new InvalidArgumentException(
@@ -187,6 +192,31 @@ final class LocalMapSvgRenderer
                     self::finite($value['localX'] ?? null),
                     self::finite($value['localY'] ?? null),
                 ];
+                $receivedAt = $value['receivedAt'] ?? null;
+                if (!is_int($receivedAt) || $receivedAt <= 0) {
+                    throw new InvalidArgumentException(
+                        'Map path timestamp is invalid.'
+                    );
+                }
+                $ageStep = self::pathAgeStep(
+                    $receivedAt,
+                    $oldestPathAt,
+                    $newestPathAt
+                );
+                if ($runStep === null) {
+                    $runStep = $ageStep;
+                    $runPoints[] = $point;
+                } elseif ($ageStep !== $runStep) {
+                    $runPoints[] = $point;
+                    $pathRuns[] = [
+                        'ageStep' => $runStep,
+                        'points' => $runPoints,
+                    ];
+                    $runStep = $ageStep;
+                    $runPoints = [$point];
+                } else {
+                    $runPoints[] = $point;
+                }
                 $points[] = $point;
                 if (
                     $latest !== null
@@ -198,6 +228,7 @@ final class LocalMapSvgRenderer
                     $previousLatest = $latest;
                 }
                 $latest = $point;
+                $latestReceivedAt = $receivedAt;
                 ++$diagnosticPointSequence;
                 $attribution = $value['attribution'] ?? null;
                 if (!is_array($attribution)) {
@@ -239,11 +270,19 @@ final class LocalMapSvgRenderer
             if ($points === []) {
                 continue;
             }
-            $pathMarkup[] = sprintf(
-                '<polyline class="path" data-segment-sequence="%d" points="%s"/>',
-                $index + 1,
-                self::points($points, $viewport)
-            );
+            $pathRuns[] = [
+                'ageStep' => $runStep,
+                'points' => $runPoints,
+            ];
+            foreach ($pathRuns as $runIndex => $run) {
+                $pathMarkup[] = sprintf(
+                    '<polyline class="path path-age-%d" data-segment-sequence="%d" data-age-run="%d" points="%s"/>',
+                    $run['ageStep'],
+                    $index + 1,
+                    $runIndex + 1,
+                    self::points($run['points'], $viewport)
+                );
+            }
         }
 
         $stationMarkup = '';
@@ -272,6 +311,7 @@ final class LocalMapSvgRenderer
         }
 
         $mowerMarkup = '';
+        $mowerTimeMarkup = '';
         if ($latest !== null && $presentation['showMower']) {
             $mower = self::project($latest, $viewport);
             $mowerState = $presentation['mowerState'];
@@ -294,6 +334,20 @@ final class LocalMapSvgRenderer
                 )),
                 self::mowerGlyph()
             );
+            if ($mowerState !== 'docked') {
+                $timeLabelOnRight = $mower[0] <= $viewport['width'] / 2.0;
+                $mowerTimeMarkup = sprintf(
+                    '<text class="mower-time-label" data-position-received-at="%d" text-anchor="%s" x="%s" y="%s"></text>',
+                    $latestReceivedAt,
+                    $timeLabelOnRight ? 'start' : 'end',
+                    self::number(
+                        $mower[0]
+                            + ($timeLabelOnRight ? 1.0 : -1.0)
+                                * $markerRadius * 1.35
+                    ),
+                    self::number($mower[1] - $markerRadius * 1.05)
+                );
+            }
         }
 
         $legendMarkup = self::legendMarkup($viewport, $presentation);
@@ -325,7 +379,7 @@ final class LocalMapSvgRenderer
             implode('', $obstacleMarkup),
             implode('', $pathMarkup),
             implode('', $diagnosticPointMarkup),
-            $stationMarkup . $mowerMarkup,
+            $stationMarkup . $mowerMarkup . $mowerTimeMarkup,
             implode('', $labelMarkup),
             $legendMarkup
         );
@@ -602,14 +656,23 @@ final class LocalMapSvgRenderer
             'state-unknown',
             'Unbekannt'
         );
-        $markup .= sprintf(
-            '<line class="legend-path" x1="%s" x2="%s" y1="%s" y2="%s"/>%s',
-            self::number($iconX),
-            self::number($iconX + $font * 1.5),
-            self::number($rowY(7)),
-            self::number($rowY(7)),
-            $text($rowY(7), 'Fahrspur')
-        );
+        $legendPathStart = $iconX - $font * 0.75;
+        $legendPathPart = $font * 0.48;
+        foreach ([3, 2, 1, 0] as $pathStep) {
+            $markup .= sprintf(
+                '<line class="legend-path path-age-%d" x1="%s" x2="%s" y1="%s" y2="%s"/>',
+                $pathStep,
+                self::number(
+                    $legendPathStart + (3 - $pathStep) * $legendPathPart
+                ),
+                self::number(
+                    $legendPathStart + (4 - $pathStep) * $legendPathPart
+                ),
+                self::number($rowY(7)),
+                self::number($rowY(7))
+            );
+        }
+        $markup .= $text($rowY(7), 'Fahrspur');
         $markup .= sprintf(
             '<rect class="legend-obstacle" x="%s" y="%s" width="%s" height="%s" rx=".25"/>%s',
             self::number($iconX - $font * 0.75),
@@ -633,6 +696,61 @@ final class LocalMapSvgRenderer
         );
 
         return $markup;
+    }
+
+    /**
+     * @param list<array<string, mixed>> $segments
+     *
+     * @return array{0: int|null, 1: int|null}
+     */
+    private static function pathTimeRange(array $segments): array
+    {
+        $oldest = null;
+        $newest = null;
+        foreach ($segments as $segment) {
+            if (!is_array($segment['points'] ?? null)) {
+                throw new InvalidArgumentException('Map path is invalid.');
+            }
+            foreach ($segment['points'] as $point) {
+                $receivedAt = is_array($point)
+                    ? ($point['receivedAt'] ?? null)
+                    : null;
+                if (!is_int($receivedAt) || $receivedAt <= 0) {
+                    throw new InvalidArgumentException(
+                        'Map path timestamp is invalid.'
+                    );
+                }
+                $oldest = $oldest === null
+                    ? $receivedAt
+                    : min($oldest, $receivedAt);
+                $newest = $newest === null
+                    ? $receivedAt
+                    : max($newest, $receivedAt);
+            }
+        }
+
+        return [$oldest, $newest];
+    }
+
+    private static function pathAgeStep(
+        int $receivedAt,
+        ?int $oldest,
+        ?int $newest
+    ): int {
+        if ($oldest === null || $newest === null || $newest <= $oldest) {
+            return 0;
+        }
+        $relativeAge = ($newest - $receivedAt) / ($newest - $oldest);
+        if ($relativeAge <= 0.25) {
+            return 0;
+        }
+        if ($relativeAge <= 0.5) {
+            return 1;
+        }
+        if ($relativeAge <= 0.75) {
+            return 2;
+        }
+        return 3;
     }
 
     private static function stationGlyph(): string
@@ -682,10 +800,14 @@ final class LocalMapSvgRenderer
                 'background' => '#171b1f',
                 'obstacleFill' => '#c1c9ce',
                 'obstacleStroke' => '#8e9aa2',
-                'path' => '#f2f5f4',
+                'pathAge0' => '#f2f5f4',
+                'pathAge1' => '#c4ccd1',
+                'pathAge2' => '#89959d',
+                'pathAge3' => '#505c64',
                 'pointStroke' => '#171b1f',
-                'label' => '#f2f5f4',
+                'label' => '#c7ced2',
                 'labelStroke' => '#171b1f',
+                'positionLabel' => '#ffd166',
                 'legendBackground' => '#20262b',
                 'legendBorder' => '#59656d',
                 'legendText' => '#e8edef',
@@ -694,10 +816,14 @@ final class LocalMapSvgRenderer
                 'background' => '#f8fafc',
                 'obstacleFill' => '#94a3b8',
                 'obstacleStroke' => '#64748b',
-                'path' => '#111827',
+                'pathAge0' => '#111827',
+                'pathAge1' => '#475569',
+                'pathAge2' => '#94a3b8',
+                'pathAge3' => '#cbd5e1',
                 'pointStroke' => '#ffffff',
-                'label' => '#111827',
+                'label' => '#374151',
                 'labelStroke' => '#ffffff',
+                'positionLabel' => '#9a5b00',
                 'legendBackground' => '#ffffff',
                 'legendBorder' => '#cbd5e1',
                 'legendText' => '#1f2937',
@@ -728,9 +854,15 @@ final class LocalMapSvgRenderer
             ),
             '.obstacle-ambiguous{fill:#ff4d5a;fill-opacity:.08;stroke:#ff4d5a}',
             sprintf(
-                '.path{fill:none;stroke:%s;stroke-width:%s;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}',
-                $palette['path'],
+                '.path{fill:none;stroke-width:%s;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}',
                 $pathWidth
+            ),
+            sprintf(
+                '.path-age-0{stroke:%s}.path-age-1{stroke:%s}.path-age-2{stroke:%s}.path-age-3{stroke:%s}',
+                $palette['pathAge0'],
+                $palette['pathAge1'],
+                $palette['pathAge2'],
+                $palette['pathAge3']
             ),
             sprintf(
                 '.path-point{stroke:%s;stroke-width:%s;vector-effect:non-scaling-stroke}',
@@ -753,6 +885,12 @@ final class LocalMapSvgRenderer
             ),
             '.mower-direction,.legend-mower .mower-direction{fill:none;stroke:#ffffff;stroke-linecap:round;stroke-linejoin:round}',
             '.mower-freshness-halo{display:none;fill:none;stroke:#ffb020;stroke-width:.72;stroke-dasharray:1.25 .8;vector-effect:non-scaling-stroke}.mower-position-delayed .mower-freshness-halo{display:inline}.legend-freshness-delayed{fill:none;stroke:#ffb020;stroke-width:.72;stroke-dasharray:1.25 .8;vector-effect:non-scaling-stroke}',
+            sprintf(
+                '.mower-time-label{display:none;font-family:system-ui,sans-serif;font-size:%spx;font-weight:650;fill:%s;paint-order:stroke;stroke:%s;stroke-width:.42;stroke-linejoin:round;letter-spacing:0}.mower-time-label[data-visible="true"]{display:inline}',
+                self::number(max(1.35, $font * 0.78)),
+                $palette['positionLabel'],
+                $palette['labelStroke']
+            ),
             '.mower-active .mower-body,.legend-mower-active .mower-body,.state-active{fill:#39d98a;stroke:#0b3b29}',
             '.mower-paused .mower-body,.legend-mower-paused .mower-body,.state-paused{fill:#ffd166;stroke:#6e4b0a}',
             '.mower-returning .mower-body,.legend-mower-returning .mower-body,.state-returning{fill:#ff9f1c;stroke:#70420a}',
@@ -761,7 +899,7 @@ final class LocalMapSvgRenderer
             '.mower-unknown .mower-body,.legend-mower-unknown .mower-body,.state-unknown{fill:#d946ef;stroke:#701a75}',
             '.mower-docked .mower-body,.legend-mower-docked .mower-body,.state-docked{fill:#39d98a;stroke:#0b3b29}',
             sprintf(
-                '.zone-label{font-family:system-ui,sans-serif;font-size:%spx;text-anchor:middle;dominant-baseline:middle;fill:%s;paint-order:stroke;stroke:%s;stroke-width:.35;stroke-linejoin:round;letter-spacing:0}',
+                '.zone-label{font-family:system-ui,sans-serif;font-size:%spx;text-anchor:middle;dominant-baseline:middle;fill:%s;fill-opacity:.8;paint-order:stroke;stroke:%s;stroke-width:.28;stroke-linejoin:round;letter-spacing:0}',
                 $fontSize,
                 $palette['label'],
                 $palette['labelStroke']
@@ -781,9 +919,8 @@ final class LocalMapSvgRenderer
                 $palette['legendText']
             ),
             sprintf(
-                '.legend-state{stroke-width:%s;vector-effect:non-scaling-stroke}.legend-path{stroke:%s;stroke-width:%s;stroke-linecap:round;vector-effect:non-scaling-stroke}',
+                '.legend-state{stroke-width:%s;vector-effect:non-scaling-stroke}.legend-path{stroke-width:%s;stroke-linecap:round;vector-effect:non-scaling-stroke}',
                 $strokeWidth,
-                $palette['path'],
                 $pathWidth
             ),
             sprintf(

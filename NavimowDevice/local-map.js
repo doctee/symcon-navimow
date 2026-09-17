@@ -13,6 +13,10 @@
     const followButton = root.querySelector('[data-follow]');
     const pointers = new Map();
     const viewportEdgeInset = 6;
+    const positionTimeFormatter = new Intl.DateTimeFormat('de-DE', {
+        hour: '2-digit',
+        minute: '2-digit',
+    });
     const state = {
         svg: null,
         fitViewBox: null,
@@ -22,6 +26,7 @@
         drag: null,
         pinch: null,
         legendFrame: null,
+        statisticsFrame: null,
     };
 
     function alignLegendRight()
@@ -60,12 +65,9 @@
         if (!(legendBox.width > 0) || !(legendBox.height > 0)) {
             return;
         }
-        const statisticsRect = statistics.getBoundingClientRect();
-        const bottomInset = viewportEdgeInset
-            + (statisticsRect.height > 0 ? statisticsRect.height : 0);
         const target = state.svg.createSVGPoint();
         target.x = mapRect.right - viewportEdgeInset;
-        target.y = mapRect.bottom - bottomInset;
+        target.y = mapRect.bottom - viewportEdgeInset;
         const viewportTarget = target.matrixTransform(matrix.inverse());
         const x = viewportTarget.x
             - (legendBox.x + legendBox.width) * counterScale;
@@ -86,6 +88,50 @@
             state.legendFrame = null;
             alignLegendRight();
         });
+    }
+
+    function updateStatisticsLayout()
+    {
+        const height = statistics.childElementCount > 0
+            ? Math.ceil(statistics.getBoundingClientRect().height)
+            : 0;
+        root.style.setProperty('--nav-statistics-height', height + 'px');
+        scheduleLegendAlignment();
+    }
+
+    function scheduleStatisticsLayout()
+    {
+        if (state.statisticsFrame !== null) {
+            cancelAnimationFrame(state.statisticsFrame);
+        }
+        state.statisticsFrame = requestAnimationFrame(function () {
+            state.statisticsFrame = null;
+            updateStatisticsLayout();
+        });
+    }
+
+    function updateMowerTimeLabel()
+    {
+        const label = state.svg
+            ? state.svg.querySelector('.mower-time-label[data-position-received-at]')
+            : null;
+        if (!label) {
+            return;
+        }
+        const receivedAt = Number(label.dataset.positionReceivedAt);
+        const ageSeconds = Math.floor(Date.now() / 1000) - receivedAt;
+        if (!Number.isFinite(receivedAt) || receivedAt <= 0 || ageSeconds <= 60) {
+            label.textContent = '';
+            label.removeAttribute('data-visible');
+            label.removeAttribute('aria-label');
+            return;
+        }
+        const formatted = positionTimeFormatter.format(
+            new Date(receivedAt * 1000)
+        );
+        label.textContent = formatted;
+        label.dataset.visible = 'true';
+        label.setAttribute('aria-label', 'Letzte Position ' + formatted);
     }
 
     function parseViewBox(svg)
@@ -201,13 +247,11 @@
         return 'vor ' + zone.recencyDays + ' Tagen';
     }
 
-    function renderStatistics(analytics)
+    function renderStatistics(zones)
     {
         statistics.replaceChildren();
-        const zones = analytics && Array.isArray(analytics.zones)
-            ? analytics.zones
-            : [];
-        zones.forEach(function (zone) {
+        const entries = Array.isArray(zones) ? zones : [];
+        entries.forEach(function (zone) {
             const row = document.createElement('div');
             row.className = 'nav-map__zone-stat';
             row.dataset.recency = String(zone.recencyState || 0);
@@ -216,12 +260,21 @@
             const recency = document.createElement('span');
             recency.textContent = recencyText(zone);
             const coverage = document.createElement('span');
-            coverage.textContent = 'Lauf ' + formatPercent(zone.latestRunCoveragePercent);
+            coverage.textContent = Number.isFinite(zone.latestRunCoveragePercent)
+                ? 'Abdeckung ' + formatPercent(zone.latestRunCoveragePercent)
+                : (Number.isFinite(zone.passProgressPercent)
+                    ? 'Fortschritt ' + formatPercent(zone.passProgressPercent)
+                    : 'Noch keine Laufdaten');
             const week = document.createElement('span');
-            week.textContent = 'Woche ' + formatArea(zone.weekEstimatedArea);
+            week.textContent = Number.isFinite(zone.weekEstimatedArea)
+                ? 'Woche ' + formatArea(zone.weekEstimatedArea)
+                : (Number.isFinite(zone.observedArea)
+                    ? 'Beobachtet ' + formatArea(zone.observedArea)
+                    : 'Fläche noch offen');
             row.append(title, recency, coverage, week);
             statistics.append(row);
         });
+        scheduleStatisticsLayout();
     }
 
     function zoneEntries(analytics)
@@ -285,7 +338,13 @@
         state.geometryKey = payload.analytics ? payload.analytics.geometryKey : null;
         applyViewBox(sameGeometry && previous ? previous : [...state.fitViewBox]);
         populateZones(payload.analytics);
-        renderStatistics(payload.analytics);
+        renderStatistics(
+            Array.isArray(payload.statistics)
+                ? payload.statistics
+                : (payload.analytics && Array.isArray(payload.analytics.zones)
+                    ? payload.analytics.zones
+                    : [])
+        );
         root.dataset.theme = payload.theme === 'light' ? 'light' : 'dark';
         status.textContent = payload.status === 'stale'
             ? 'Position veraltet'
@@ -293,6 +352,7 @@
         if (state.following) {
             focusMower();
         }
+        updateMowerTimeLabel();
         scheduleLegendAlignment();
     }
 
@@ -310,6 +370,7 @@
             if (payload.action === 'configurationError') {
                 stage.replaceChildren();
                 statistics.replaceChildren();
+                scheduleStatisticsLayout();
                 status.textContent = payload.message || 'Karte nicht verfügbar';
                 return;
             }
@@ -421,5 +482,13 @@
     });
 
     window.handleMessage = handleMessage;
-    window.addEventListener('resize', scheduleLegendAlignment);
+    window.addEventListener('resize', function () {
+        scheduleStatisticsLayout();
+        scheduleLegendAlignment();
+    });
+    if (typeof ResizeObserver === 'function') {
+        const statisticsObserver = new ResizeObserver(scheduleStatisticsLayout);
+        statisticsObserver.observe(statistics);
+    }
+    window.setInterval(updateMowerTimeLabel, 15000);
 }());
