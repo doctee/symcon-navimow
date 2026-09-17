@@ -19,6 +19,8 @@ body {
     --nav-text: #f2f5f4;
     --nav-accent: #55c1e7;
     --nav-statistics-height: 0px;
+    --nav-host-interaction-inset: 46px;
+    --nav-navigation-frame-lift: 3px;
     position: relative;
     width: 100%;
     height: 100%;
@@ -86,30 +88,34 @@ body {
 }
 
 .nav-map__navigation {
-    top: 52px;
-    left: 6px;
+    top: calc(
+        var(--nav-host-interaction-inset)
+        - var(--nav-navigation-frame-lift)
+    );
+    left: 4px;
     right: auto;
     display: grid;
-    grid-template-columns: 30px 30px 40px 54px minmax(86px, 130px);
-    max-width: calc(100% - 12px);
+    grid-template-columns: 28px 28px 36px 50px;
+    max-width: calc(100% - 8px);
     gap: 2px;
-    padding: 3px;
+    padding: 2px 3px;
     border-radius: 6px;
     touch-action: auto;
     pointer-events: auto;
 }
 
-.nav-map__navigation button,
-.nav-map__navigation select {
+.nav-map__navigation button {
     box-sizing: border-box;
     min-width: 0;
-    height: 30px;
+    height: 28px;
     border: 1px solid var(--nav-border);
     border-radius: 5px;
     background: var(--nav-panel);
     color: var(--nav-text);
     font: inherit;
     font-size: 11px;
+    line-height: 1;
+    padding: 0 3px;
     letter-spacing: 0;
     touch-action: manipulation;
     -webkit-tap-highlight-color: transparent;
@@ -123,17 +129,6 @@ body {
 .nav-map__navigation button[aria-pressed="true"] {
     border-color: var(--nav-accent);
     color: var(--nav-accent);
-}
-
-.nav-map__navigation select {
-    padding: 0 5px;
-    background-color: var(--nav-panel-solid);
-    color-scheme: inherit;
-}
-
-.nav-map__navigation select option {
-    background-color: var(--nav-panel-solid);
-    color: var(--nav-text);
 }
 
 .nav-map__statistics {
@@ -155,31 +150,28 @@ body {
 
 .nav-map__zone-stat {
     display: grid;
-    grid-template-columns: auto auto;
-    gap: 0 8px;
-    min-width: 148px;
-    padding: 5px 8px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1px;
+    min-width: 112px;
+    max-width: 160px;
+    padding: 4px 7px;
     border-right: 1px solid var(--nav-border);
     font-size: 11px;
     line-height: 1.2;
 }
 
 .nav-map__zone-stat strong {
-    grid-column: 1 / -1;
+    color: var(--nav-zone-color, var(--nav-text));
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
-.nav-map__zone-stat[data-recency="2"] strong {
-    color: #ffd166;
-}
-
-.nav-map__zone-stat[data-recency="3"] strong {
-    color: #ff5964;
-}
-
 .nav-map__zone-stat span {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
 }
 
@@ -199,7 +191,7 @@ body {
 
 @media (max-width: 680px) {
     .nav-map__navigation {
-        grid-template-columns: 30px 30px 38px 50px minmax(80px, 108px);
+        grid-template-columns: 28px 28px 36px 48px;
     }
 
     .nav-map__status {
@@ -209,34 +201,31 @@ body {
 
 @media (max-width: 380px) {
     .nav-map__navigation {
-        left: 4px;
-        grid-template-columns: 28px 28px 36px 46px minmax(74px, 1fr);
-        max-width: calc(100% - 8px);
+        grid-template-columns: 26px 26px 34px 46px;
         padding: 2px;
     }
 
-    .nav-map__navigation button,
-    .nav-map__navigation select {
+    .nav-map__navigation button {
         font-size: 10px;
-    }
-
-    .nav-map__navigation select {
-        padding: 0 3px;
     }
 }
 
 @media (pointer: coarse) {
-    .nav-map__navigation button,
-    .nav-map__navigation select {
-        height: 38px;
+    .nav-map__navigation button {
+        height: 30px;
         font-size: 12px;
     }
 }
 
+@media (hover: hover) and (pointer: fine) {
+    .nav-map {
+        --nav-host-interaction-inset: 48px;
+    }
+}
+
 @media (pointer: coarse) and (max-width: 380px) {
-    .nav-map__navigation button,
-    .nav-map__navigation select {
-        height: 36px;
+    .nav-map__navigation button {
+        height: 30px;
         font-size: 11px;
     }
 }
