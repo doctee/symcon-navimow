@@ -1,4 +1,5 @@
 {
+  "$schema": "https://www.symcon.de/assets/files/validation/moduleSchema.json",
   "id": "{692AAB8D-A579-488D-9B65-49BE3D2DC451}",
   "name": "Navimow Configurator",
   "type": 4,

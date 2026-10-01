@@ -1,4 +1,5 @@
 {
+  "$schema": "https://www.symcon.de/assets/files/validation/formSchema.json",
   "elements": [
     {
       "type": "SelectInstance",

@@ -1,4 +1,5 @@
 {
+  "$schema": "https://www.symcon.de/assets/files/validation/moduleSchema.json",
   "id": "{4BD2B356-7890-4667-9B4F-35C619175B43}",
   "name": "Navimow Device",
   "type": 3,

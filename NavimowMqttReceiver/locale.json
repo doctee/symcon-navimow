@@ -1,4 +1,5 @@
 {
+  "$schema": "https://www.symcon.de/assets/files/validation/localeSchema.json",
   "translations": {
     "de": {
       "Navimow MQTT Receiver": "Navimow MQTT-Empfaenger",
