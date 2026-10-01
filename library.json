@@ -1,4 +1,5 @@
 {
+  "$schema": "https://www.symcon.de/assets/files/validation/librarySchema.json",
   "id": "{ACBFEAAE-BD26-4166-AA39-0A674531E9F5}",
   "author": "SAEF",
   "name": "Navimow",

@@ -1,4 +1,5 @@
 {
+  "$schema": "https://www.symcon.de/assets/files/validation/moduleSchema.json",
   "id": "{1B9960A2-A30C-D846-DF55-800F583AA812}",
   "name": "Navimow MQTT Receiver",
   "type": 3,

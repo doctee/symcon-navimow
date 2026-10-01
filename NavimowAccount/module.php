@@ -3973,21 +3973,12 @@ class NavimowAccount extends IPSModule
 
     private function registerKernelStartMessage(): void
     {
-        $registerMessage = [$this, 'Register' . 'Message'];
-        if (!is_callable($registerMessage)) {
-            return;
-        }
-        $registerMessage(0, $this->kernelStartedMessageId());
+        $this->RegisterMessage(0, $this->kernelStartedMessageId());
     }
 
     private function kernelStartedMessageId(): int
     {
-        if (!defined('IPS_KERNELSTARTED')) {
-            return 10001;
-        }
-        $messageId = constant('IPS_KERNELSTARTED');
-
-        return is_int($messageId) ? $messageId : 10001;
+        return IPS_KERNELSTARTED;
     }
 
     private function instanceStatusChangedMessageId(): int
@@ -4038,7 +4029,6 @@ class NavimowAccount extends IPSModule
         $unregisterMessage = [$this, 'Unregister' . 'Message'];
         if (
             !is_callable($getMessageList)
-            || !is_callable($registerMessage)
             || !is_callable($unregisterMessage)
         ) {
             return;
