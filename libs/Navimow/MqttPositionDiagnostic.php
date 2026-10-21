@@ -32,6 +32,7 @@ final class MqttPositionDiagnostic
             'maximumPositiveSourceGapMilliseconds' => 0,
             'bounds' => null,
             'outOfOrderTimestampCount' => 0,
+            'rejectedTimestampCount' => 0,
             'downsampledCount' => 0,
             'evictedCount' => 0,
         ];
@@ -59,11 +60,17 @@ final class MqttPositionDiagnostic
         ];
 
         $lastSourceTimestamp = $previous['lastSourceTimestamp'];
+        // Reconnect/restart does not prove a new device clock epoch.
         if (
             $lastSourceTimestamp !== null
-            && $sample['sourceTimestamp'] < $lastSourceTimestamp
+            && $sample['sourceTimestamp'] <= $lastSourceTimestamp
         ) {
-            $next['outOfOrderTimestampCount']++;
+            if ($sample['sourceTimestamp'] < $lastSourceTimestamp) {
+                $next['outOfOrderTimestampCount']++;
+            }
+            $next['rejectedTimestampCount'] =
+                ($previous['rejectedTimestampCount'] ?? 0) + 1;
+            return $next;
         }
         if (
             $lastSourceTimestamp !== null
@@ -236,7 +243,10 @@ final class MqttPositionDiagnostic
                 'receivedSampleCount' => $state['sampleSequence'],
                 'retainedSampleCount' => count($state['track']),
                 'droppedSampleCount' =>
-                    $state['downsampledCount'] + $state['evictedCount'],
+                    $state['downsampledCount'] + $state['evictedCount']
+                        + ($state['rejectedTimestampCount'] ?? 0),
+                'rejectedTimestampCount' =>
+                    $state['rejectedTimestampCount'] ?? 0,
                 'downsampledSampleCount' => $state['downsampledCount'],
                 'evictedSampleCount' => $state['evictedCount'],
                 'outOfOrderTimestampCount' =>
@@ -328,6 +338,7 @@ final class MqttPositionDiagnostic
             || !self::nonNegativeInteger(
                 $state['outOfOrderTimestampCount'] ?? null
             )
+            || !self::nonNegativeInteger($state['rejectedTimestampCount'] ?? 0)
             || !self::nonNegativeInteger(
                 $state['downsampledCount'] ?? null
             )

@@ -158,6 +158,7 @@ class NavimowAccount extends IPSModule
         $this->RegisterAttributeString('DiscoveryCache', '[]');
         $this->RegisterAttributeInteger('WakePollingUntil', 0);
         $this->RegisterAttributeString('ActiveDeviceObservations', '[]');
+        $this->RegisterAttributeString('MqttRestObservation', '{}');
         $this->RegisterAttributeString('MqttOwnershipRegistry', '{}');
         $this->RegisterAttributeString('MqttClientIdentity', '');
         $this->RegisterAttributeString('MqttLifecycleRegistry', '{}');
@@ -676,6 +677,7 @@ class NavimowAccount extends IPSModule
                 ['disabled', 'ready', 'configuration-invalid']
             ),
             'operation' => $operation,
+            'dataFlow' => $this->mqttDataFlowProjection(),
             'lifecycle' => [
                 'state' => $this->mqttDiagnosticCode(
                     $lifecycle['state'] ?? null,
@@ -2431,6 +2433,32 @@ class NavimowAccount extends IPSModule
         int $vehicleState,
         int $observedAt
     ): void {
+        $evidence = $this->decodeMqttAttribute('MqttRestObservation', []);
+        $deviceKey = hash('sha256', $deviceId);
+        $moving = in_array($vehicleState, [
+            self::VEHICLE_STATE_RUNNING, self::VEHICLE_STATE_DOCKING,
+        ], true);
+        $previous = $evidence[$deviceKey] ?? [];
+        $evidence[$deviceKey] = [
+            'vehicleState' => $vehicleState,
+            'observedAt' => $observedAt,
+            'expectedSince' => $moving
+                ? (($previous['expectedSince'] ?? 0) > 0
+                    && ($previous['observedAt'] ?? 0) <= $observedAt
+                    && $observedAt - ($previous['observedAt'] ?? 0)
+                        <= self::MQTT_COMPARISON_MAX_AGE_SECONDS
+                    ? $previous['expectedSince'] : $observedAt)
+                : 0,
+        ];
+        $evidence = $this->limitMqttEntries(
+            $evidence,
+            self::MQTT_MAX_TRACKED_DEVICES,
+            'observedAt'
+        );
+        $this->WriteAttributeString(
+            'MqttRestObservation',
+            $this->encodeResult($evidence)
+        );
         $observations = $this->activeDeviceObservations();
         $key = hash('sha256', $deviceId);
         $wasActive = array_key_exists($key, $observations);
@@ -2546,6 +2574,7 @@ class NavimowAccount extends IPSModule
 
     private function clearAdaptivePollingState(): void
     {
+        $this->WriteAttributeString('MqttRestObservation', '{}');
         $this->WriteAttributeInteger('WakePollingUntil', 0);
         $this->WriteAttributeString('ActiveDeviceObservations', '[]');
     }
@@ -3733,6 +3762,63 @@ class NavimowAccount extends IPSModule
                 (int) $this->GetValue('MqttLastMessageAt'),
             'lastAcceptedPositionAt' =>
                 (int) $this->GetValue('MqttLastPositionAt'),
+        ];
+    }
+
+    /** Diagnostic only: this projection must never request recovery. */
+    private function mqttDataFlowProjection(): array
+    {
+        $now = $this->currentTimestamp();
+        $root = $this->decodeMqttAttribute(
+            'MqttPositionDiagnostic',
+            $this->initialMqttPositionDiagnosticRoot()
+        );
+        $evidence = $this->decodeMqttAttribute('MqttRestObservation', []);
+        $key = $root['deviceKey'] ?? null;
+        if ($key === null && count($evidence) === 1) {
+            $key = array_key_first($evidence);
+        }
+        $rest = is_string($key)
+            ? ($evidence[$key] ?? []) : [];
+        $restAt = $rest['observedAt'] ?? 0;
+        $restFresh = is_int($restAt) && $restAt > 0 && $restAt <= $now
+            && $now - $restAt <= self::MQTT_COMPARISON_MAX_AGE_SECONDS;
+        $expected = $restFresh && in_array($rest['vehicleState'] ?? null, [
+            self::VEHICLE_STATE_RUNNING, self::VEHICLE_STATE_DOCKING,
+        ], true);
+        $positionAt = $root['state']['latest']['receivedAt'] ?? 0;
+        $age = is_int($positionAt) && $positionAt > 0 && $positionAt <= $now
+            ? $now - $positionAt : null;
+        $transportHealthy = false;
+        try {
+            $transportHealthy = $this->mqttContinuousTransportIsHealthy(
+                $this->mqttTopology()
+            );
+        } catch (Throwable) {
+            // Missing or invalid topology is not proof of a working transport.
+        }
+        $expectedSince = $rest['expectedSince'] ?? 0;
+        $status = match (true) {
+            !$this->ReadPropertyBoolean('EnableMqttShadow'),
+            !$this->ReadPropertyBoolean('EnableMqttPositionDiagnostics') => 'disabled',
+            !$transportHealthy => 'transport-unavailable',
+            !$restFresh => 'rest-unknown',
+            !$expected => 'not-expected',
+            $age !== null && $age <= self::MQTT_POSITION_FRESH_SECONDS
+                && $positionAt >= $expectedSince => 'receiving',
+            is_int($expectedSince) && $expectedSince > 0
+                && $now >= $expectedSince
+                && $now - $expectedSince <= self::MQTT_POSITION_FRESH_SECONDS => 'awaiting-data',
+            default => 'telemetry-missing',
+        };
+
+        return [
+            'status' => $status,
+            'transportHealthy' => $transportHealthy,
+            'restEvidenceFresh' => $restFresh,
+            'positionExpected' => $expected,
+            'positionAgeSeconds' => $age,
+            'automaticRecoveryEnabled' => false,
         ];
     }
 
@@ -7482,12 +7568,11 @@ class NavimowAccount extends IPSModule
                 )
                 && is_array($patch['pose'] ?? null)
             ) {
-                $this->reduceMqttPositionDiagnostic(
+                $positionAccepted = $this->reduceMqttPositionDiagnostic(
                     $deviceKey,
                     $patch['pose'],
                     $receivedAt
-                );
-                $positionAccepted = true;
+                ) || $positionAccepted;
             }
             $reconciliation = $reconciliation
                 || $reduced['reconciliationHint'];
@@ -7595,7 +7680,7 @@ class NavimowAccount extends IPSModule
         string $deviceKey,
         array $pose,
         int $receivedAt
-    ): void {
+    ): bool {
         $root = $this->decodeMqttAttribute(
             'MqttPositionDiagnostic',
             $this->initialMqttPositionDiagnosticRoot()
@@ -7610,7 +7695,7 @@ class NavimowAccount extends IPSModule
                 'MqttPositionDiagnostic',
                 $this->encodeResult($root)
             );
-            return;
+            return false;
         }
 
         $root['deviceKey'] = $deviceKey;
@@ -7632,6 +7717,12 @@ class NavimowAccount extends IPSModule
             'MqttPositionDiagnostic',
             $this->encodeResult($root)
         );
+        if (
+            ($root['state']['latest']['sampleSequence'] ?? null)
+                !== $root['state']['sampleSequence']
+        ) {
+            return false;
+        }
         $this->SetValue(
             'MqttLastPositionAt',
             max(
@@ -7639,6 +7730,7 @@ class NavimowAccount extends IPSModule
                 $receivedAt
             )
         );
+        return true;
     }
 
     /** @param array<string, mixed> $pilot */
@@ -7893,22 +7985,25 @@ class NavimowAccount extends IPSModule
         if (!is_array($candidate)) {
             return;
         }
-        $mqttReceivedAt = $candidate['lastReceivedAt'] ?? null;
-        if (
-            !is_int($mqttReceivedAt)
-            || $mqttReceivedAt <= 0
-            || ($receivedAt - $mqttReceivedAt)
-                > self::MQTT_COMPARISON_MAX_AGE_SECONDS
-        ) {
-            $this->recordMqttComparison('stale');
-            return;
-        }
-
         $fields = $candidate['fields'] ?? null;
         if (!is_array($fields)) {
             return;
         }
         $comparisons = [];
+        foreach (['vehicleState', 'batteryLevel'] as $field) {
+            if (!array_key_exists($field, $fields)) {
+                continue;
+            }
+            $age = Navimow\MqttPartialStateAccumulator::fieldAge(
+                $candidate,
+                $field,
+                $receivedAt
+            );
+            if ($age === null || $age > self::MQTT_COMPARISON_MAX_AGE_SECONDS) {
+                $this->recordMqttComparison('stale');
+                return;
+            }
+        }
         if (
             is_int($fields['vehicleState'] ?? null)
             && is_int($restStatus['vehicleState'] ?? null)
@@ -8240,6 +8335,10 @@ class NavimowAccount extends IPSModule
         return [
             'status' => 'available',
             'authority' => 'mqtt-hint',
+            'fieldAgeSeconds' => Navimow\MqttPartialStateAccumulator::fieldAges(
+                $state,
+                $this->currentTimestamp()
+            ),
             'lastSourceTimestamp' => $sourceTimestamp,
             'lastReceivedAt' => $receivedAt,
             'ageSeconds' => max(

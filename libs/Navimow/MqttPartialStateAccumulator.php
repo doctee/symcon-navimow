@@ -37,6 +37,8 @@ final class MqttPartialStateAccumulator
         return [
             'formatVersion' => self::FORMAT_VERSION,
             'fields' => [],
+            'fieldReceivedAt' => [],
+            'fieldSourceTimestamp' => [],
             'lastSourceTimestamp' => null,
             'lastReceivedAt' => 0,
         ];
@@ -112,8 +114,26 @@ final class MqttPartialStateAccumulator
         }
 
         $next = $previous;
+        $next['fieldReceivedAt'] ??= [];
+        $next['fieldSourceTimestamp'] ??= [];
         $changedFields = [];
         foreach ($fields as $name => $value) {
+            // Equal source times may complete a packet, not refresh old fields.
+            $fieldSource = $next['fieldSourceTimestamp'][$name] ?? null;
+            if (
+                $fieldSource === null
+                && !array_key_exists($name, $next['fieldReceivedAt'])
+                && array_key_exists($name, $previous['fields'])
+            ) {
+                $fieldSource = $previous['lastSourceTimestamp'];
+            }
+            if (
+                $sourceTimestamp !== null
+                && is_int($fieldSource)
+                && $sourceTimestamp <= $fieldSource
+            ) {
+                continue;
+            }
             if (
                 !array_key_exists($name, $next['fields'])
                 || $next['fields'][$name] !== $value
@@ -121,6 +141,8 @@ final class MqttPartialStateAccumulator
                 $next['fields'][$name] = $value;
                 $changedFields[] = $name;
             }
+            $next['fieldReceivedAt'][$name] = $receivedAt;
+            $next['fieldSourceTimestamp'][$name] = $sourceTimestamp;
         }
         ksort($next['fields']);
         sort($changedFields);
@@ -202,6 +224,28 @@ final class MqttPartialStateAccumulator
         return self::initialState();
     }
 
+    public static function fieldAge(array $state, string $field, int $now): ?int
+    {
+        $receivedAt = $state['fieldReceivedAt'][$field] ?? null;
+        if (!is_int($receivedAt) || $receivedAt <= 0 || $receivedAt > $now) {
+            return null;
+        }
+
+        return $now - $receivedAt;
+    }
+
+    public static function fieldAges(array $state, int $now): array
+    {
+        $ages = [];
+        foreach (self::ALLOWED_FIELDS as $field) {
+            if (array_key_exists($field, $state['fields'] ?? [])) {
+                $ages[$field] = self::fieldAge($state, $field, $now);
+            }
+        }
+
+        return $ages;
+    }
+
     private static function assertState(array $state): void
     {
         if (
@@ -228,6 +272,23 @@ final class MqttPartialStateAccumulator
                 throw new MqttPayloadException(
                     'MQTT shadow state contains an unsupported field.'
                 );
+            }
+        }
+        foreach (['fieldReceivedAt', 'fieldSourceTimestamp'] as $key) {
+            $timestamps = $state[$key] ?? [];
+            if (!is_array($timestamps) || count($timestamps) > count(self::ALLOWED_FIELDS)) {
+                throw new MqttPayloadException('MQTT field timestamps are malformed.');
+            }
+            foreach ($timestamps as $name => $timestamp) {
+                if (
+                    !array_key_exists($name, $state['fields'])
+                    || !(
+                        ($key === 'fieldSourceTimestamp' && $timestamp === null)
+                        || (is_int($timestamp) && $timestamp > 0)
+                    )
+                ) {
+                    throw new MqttPayloadException('MQTT field timestamp is invalid.');
+                }
             }
         }
     }
