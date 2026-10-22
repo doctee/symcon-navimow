@@ -275,7 +275,7 @@ class NavimowAccount extends IPSModule
 
         $kernelReconciliationRequired =
             $this->mqttKernelReconciliationMustTakePrecedence();
-        $this->clearMqttEphemeralState();
+        $this->clearMqttEphemeralState('apply-changes');
         $this->SetTimerInterval('MqttReconcile', 0);
         $this->SetTimerInterval('MqttLifecycle', 0);
         $this->SetTimerInterval('MqttContinuousLease', 0);
@@ -678,6 +678,7 @@ class NavimowAccount extends IPSModule
             ),
             'operation' => $operation,
             'dataFlow' => $this->mqttDataFlowProjection(),
+            'observationResets' => $this->mqttObservationResetProjection(),
             'lifecycle' => [
                 'state' => $this->mqttDiagnosticCode(
                     $lifecycle['state'] ?? null,
@@ -1007,7 +1008,7 @@ class NavimowAccount extends IPSModule
                 );
             }
 
-            $trackedDeviceCount = $root['deviceKey'] === null ? 0 : 1;
+            $trackedDeviceCount = ($root['state']['latest'] ?? null) === null ? 0 : 1;
             if ($root['conflictingDeviceCount'] > 0) {
                 return $this->encodeResult($base + [
                     'status' => 'ambiguous',
@@ -2579,15 +2580,48 @@ class NavimowAccount extends IPSModule
         $this->WriteAttributeString('ActiveDeviceObservations', '[]');
     }
 
-    private function clearMqttEphemeralState(): void
+    private function clearMqttEphemeralState(string $reason): void
     {
+        try {
+            $shadow = $this->mqttOrderingSnapshot(
+                'MqttShadowState',
+                ['formatVersion' => 1, 'devices' => []]
+            );
+            $previousShadow = $shadow;
+            foreach ($shadow['devices'] as &$device) {
+                $device['state'] = Navimow\MqttPartialStateAccumulator::resetObservations($device['state']);
+            }
+            unset($device);
+            $position = $this->mqttOrderingSnapshot(
+                'MqttPositionDiagnostic',
+                $this->initialMqttPositionDiagnosticRoot()
+            );
+            $position += $this->initialMqttPositionDiagnosticRoot();
+            $nextPosition = $position;
+            $nextPosition['state'] = Navimow\MqttPositionDiagnostic::resetObservations($position['state']);
+        } catch (Throwable) {
+            // Preserve unknown boundaries, but never block credential cleanup.
+            $this->appendMqttError('ordering-state-invalid');
+            return;
+        }
+        $observationsChanged = $nextPosition != $position || $shadow != $previousShadow;
+        $statistics = $this->mqttStatistics();
+        $statistics['observationResetSequence'] = $this->incrementMqttCounter(
+            $statistics['observationResetSequence'] ?? null
+        );
+        $statistics['lastObservationResetAt'] = $this->currentTimestamp();
+        $statistics['lastObservationResetReason'] = $reason;
+        $statistics['positionAccountingStartedAt'] ??= $this->currentTimestamp();
+        foreach (['sampleSequence', 'outOfOrderTimestampCount', 'rejectedTimestampCount'] as $counter) {
+            $statistics['closedPositionCounters'][$counter] = min(
+                self::MQTT_MAX_DIAGNOSTIC_COUNTER,
+                ($statistics['closedPositionCounters'][$counter] ?? 0) + ($position['state'][$counter] ?? 0)
+            );
+        }
         $this->preserveMqttPilotPositionAccountingBeforeClear();
         $this->WriteAttributeString(
             'MqttShadowState',
-            $this->encodeResult([
-                'formatVersion' => 1,
-                'devices' => [],
-            ])
+            $this->encodeResult($shadow)
         );
         $this->WriteAttributeString(
             'MqttPendingReconciliation',
@@ -2598,10 +2632,61 @@ class NavimowAccount extends IPSModule
         );
         $this->WriteAttributeString(
             'MqttPositionDiagnostic',
-            $this->encodeResult(
-                $this->initialMqttPositionDiagnosticRoot()
-            )
+            $this->encodeResult($nextPosition)
         );
+        if ($observationsChanged) {
+            $this->writeMqttStatistics($statistics);
+        }
+    }
+
+    private function mqttObservationResetProjection(): array
+    {
+        $statistics = $this->decodeMqttDiagnosticAttribute('MqttStatistics');
+        $position = $this->decodeMqttDiagnosticAttribute('MqttPositionDiagnostic');
+        $segment = [];
+        $cumulative = [];
+        foreach (['sampleSequence', 'outOfOrderTimestampCount', 'rejectedTimestampCount'] as $counter) {
+            $segment[$counter] = $this->mqttDiagnosticInteger($position['state'][$counter] ?? null);
+            $cumulative[$counter] = min(
+                self::MQTT_MAX_DIAGNOSTIC_COUNTER,
+                $segment[$counter]
+                    + $this->mqttDiagnosticInteger($statistics['closedPositionCounters'][$counter] ?? null)
+            );
+        }
+        return [
+            'segmentSequence' => $this->mqttDiagnosticInteger($statistics['observationResetSequence'] ?? null),
+            'lastResetAt' => $this->mqttDiagnosticInteger($statistics['lastObservationResetAt'] ?? null),
+            'lastResetReason' => $this->mqttDiagnosticCode(
+                $statistics['lastObservationResetReason'] ?? null,
+                ['apply-changes', 'transport-disconnect', 'credential-rotation']
+            ),
+            'accountingStartedAt' => $this->mqttDiagnosticInteger($statistics['positionAccountingStartedAt'] ?? null),
+            'segmentCounters' => $segment,
+            'cumulativeCounters' => $cumulative,
+        ];
+    }
+
+    private function mqttOrderingSnapshot(string $ident, array $initial): array
+    {
+        $encoded = $this->ReadAttributeString($ident);
+        if (strlen($encoded) > self::MQTT_DIAGNOSTIC_ATTRIBUTE_MAX_BYTES) {
+            throw new Navimow\MqttPayloadException('MQTT ordering snapshot exceeds the limit.');
+        }
+        $decoded = json_decode($encoded, true, 32, JSON_THROW_ON_ERROR);
+        if (!is_array($decoded)) {
+            throw new Navimow\MqttPayloadException('MQTT ordering snapshot is malformed.');
+        }
+        if ($decoded === []) {
+            return $initial;
+        }
+        if (
+            ($decoded['formatVersion'] ?? null) !== 1
+            || ($ident === 'MqttShadowState' && !is_array($decoded['devices'] ?? null))
+            || ($ident === 'MqttPositionDiagnostic' && !is_array($decoded['state'] ?? null))
+        ) {
+            throw new Navimow\MqttPayloadException('MQTT ordering snapshot is malformed.');
+        }
+        return $decoded;
     }
 
     private function initialMqttPositionDiagnosticRoot(): array
@@ -2974,7 +3059,7 @@ class NavimowAccount extends IPSModule
         }
     }
 
-    private function disconnectOwnedMqttTransport(): void
+    private function disconnectOwnedMqttTransport(string $reason = 'transport-disconnect'): void
     {
         $topology = $this->mqttTopology();
         $this->assertMqttOwnership($topology);
@@ -2995,7 +3080,7 @@ class NavimowAccount extends IPSModule
             $identity,
             $this->mqttAdoptedAt()
         );
-        $this->clearMqttEphemeralState();
+        $this->clearMqttEphemeralState($reason);
         $this->SetTimerInterval('MqttReconcile', 0);
         $this->SetTimerInterval('MqttLifecycle', 0);
         $this->clearMqttLifecycleSchedule();
@@ -3693,7 +3778,7 @@ class NavimowAccount extends IPSModule
             'MqttPositionDiagnostic',
             $this->initialMqttPositionDiagnosticRoot()
         );
-        if ($lastPositionAt <= 0 || ($root['deviceKey'] ?? null) === null) {
+        if ($lastPositionAt <= 0 || ($root['state']['latest'] ?? null) === null) {
             return 0;
         }
         $age = max(0, $this->currentTimestamp() - $lastPositionAt);
@@ -4558,7 +4643,7 @@ class NavimowAccount extends IPSModule
         }
         try {
             $this->clearMqttCredentialRotationPending();
-            $this->disconnectOwnedMqttTransport();
+            $this->disconnectOwnedMqttTransport('credential-rotation');
             $this->recordMqttStatistic('credentialRotations');
             $this->recordMqttPilotRotation($this->currentTimestamp());
             $this->resetMqttReconnectEpisode();
@@ -7526,13 +7611,16 @@ class NavimowAccount extends IPSModule
         int $receivedAt
     ): string {
         $deviceKey = hash('sha256', $deviceId);
-        $shadow = $this->decodeMqttAttribute(
+        $shadow = $this->mqttOrderingSnapshot(
             'MqttShadowState',
             ['formatVersion' => 1, 'devices' => []]
         );
         $devices = is_array($shadow['devices'] ?? null)
             ? $shadow['devices']
             : [];
+        if (!isset($devices[$deviceKey]) && count($devices) >= self::MQTT_MAX_TRACKED_DEVICES) {
+            throw new Navimow\MqttPayloadException('MQTT ordering device limit reached.');
+        }
         $state = is_array($devices[$deviceKey]['state'] ?? null)
             ? $devices[$deviceKey]['state']
             : Navimow\MqttPartialStateAccumulator::initialState();
@@ -7681,7 +7769,7 @@ class NavimowAccount extends IPSModule
         array $pose,
         int $receivedAt
     ): bool {
-        $root = $this->decodeMqttAttribute(
+        $root = $this->mqttOrderingSnapshot(
             'MqttPositionDiagnostic',
             $this->initialMqttPositionDiagnosticRoot()
         );
@@ -8313,6 +8401,9 @@ class NavimowAccount extends IPSModule
 
         $sourceTimestamp = $state['lastSourceTimestamp'];
         $receivedAt = $state['lastReceivedAt'];
+        if ($state['fields'] === [] && $receivedAt === 0) {
+            return $this->emptyMqttDiagnosticShadowObservation('unavailable');
+        }
         if (
             (
                 $sourceTimestamp !== null
@@ -8600,6 +8691,7 @@ class NavimowAccount extends IPSModule
             'connection-failed',
             'connection-rollback-failed',
             'credential-cleanup-skipped',
+            'ordering-state-invalid',
             'disconnect-failed',
             'invalid-input',
             'reconnect-exhausted',
