@@ -142,7 +142,8 @@ final class MqttPartialStateAccumulator
                 $changedFields[] = $name;
             }
             $next['fieldReceivedAt'][$name] = $receivedAt;
-            $next['fieldSourceTimestamp'][$name] = $sourceTimestamp;
+            // Receipt-only evidence must not erase a known source-time boundary.
+            $next['fieldSourceTimestamp'][$name] = $sourceTimestamp ?? $fieldSource;
         }
         ksort($next['fields']);
         sort($changedFields);
@@ -221,7 +222,22 @@ final class MqttPartialStateAccumulator
         }
         self::assertState($decoded);
 
-        return self::initialState();
+        return self::resetObservations($decoded);
+    }
+
+    public static function resetObservations(array $previous): array
+    {
+        self::assertState($previous);
+        $next = self::initialState();
+        $next['lastSourceTimestamp'] = $previous['lastSourceTimestamp'];
+        $next['fieldSourceTimestamp'] = $previous['fieldSourceTimestamp'] ?? [];
+        // Legacy snapshots have only a device-wide boundary, never field freshness.
+        foreach ($previous['fields'] as $name => $_value) {
+            if (!array_key_exists($name, $next['fieldSourceTimestamp'])) {
+                $next['fieldSourceTimestamp'][$name] = $previous['lastSourceTimestamp'];
+            }
+        }
+        return $next;
     }
 
     public static function fieldAge(array $state, string $field, int $now): ?int
@@ -281,7 +297,8 @@ final class MqttPartialStateAccumulator
             }
             foreach ($timestamps as $name => $timestamp) {
                 if (
-                    !array_key_exists($name, $state['fields'])
+                    !in_array($name, self::ALLOWED_FIELDS, true)
+                    || ($key === 'fieldReceivedAt' && !array_key_exists($name, $state['fields']))
                     || !(
                         ($key === 'fieldSourceTimestamp' && $timestamp === null)
                         || (is_int($timestamp) && $timestamp > 0)

@@ -38,6 +38,14 @@ final class MqttPositionDiagnostic
         ];
     }
 
+    public static function resetObservations(array $previous): array
+    {
+        self::assertState($previous);
+        $next = self::initialState();
+        $next['lastSourceTimestamp'] = $previous['lastSourceTimestamp'];
+        return $next;
+    }
+
     public static function reduce(
         array $previous,
         array $pose,
