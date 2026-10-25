@@ -82,6 +82,9 @@ final class RevisionBoundedTrackStore
                 );
             }
             $retained = [];
+            $previousSourcePoint = null;
+            $anchor = null;
+            $suffixOnly = true;
             foreach ($points as $point) {
                 $normalized = self::sourcePoint($point);
                 $key = self::pointKey(
@@ -90,10 +93,18 @@ final class RevisionBoundedTrackStore
                 );
                 if (isset($known[$key])) {
                     ++$state['counters']['duplicatePointCount'];
+                    if ($retained !== []) {
+                        $suffixOnly = false;
+                    }
+                    $previousSourcePoint = $normalized;
                     continue;
+                }
+                if ($retained === []) {
+                    $anchor = $previousSourcePoint;
                 }
                 $known[$key] = true;
                 $retained[] = $normalized;
+                $previousSourcePoint = $normalized;
                 ++$state['counters']['ingestedPointCount'];
             }
             if ($retained === []) {
@@ -109,7 +120,7 @@ final class RevisionBoundedTrackStore
                     'Scene task-zone key is invalid.'
                 );
             }
-            $state['segments'][] = [
+            $incoming = [
                 'geometryKey' => $revision['geometryKey'],
                 'sourceSequence' => is_int(
                     $sourceSegment['sequence'] ?? null
@@ -132,12 +143,66 @@ final class RevisionBoundedTrackStore
                 'endedAt' => $retained[array_key_last($retained)]['receivedAt'],
                 'points' => $retained,
             ];
+            $tailIndex = array_key_last($state['segments']);
+            if (
+                $suffixOnly
+                && $tailIndex !== null
+                && self::continuesSegment(
+                    $state['segments'][$tailIndex],
+                    $incoming,
+                    $anchor
+                )
+            ) {
+                $state['segments'][$tailIndex]['points'] = array_merge(
+                    $state['segments'][$tailIndex]['points'],
+                    $retained
+                );
+                $state['segments'][$tailIndex]['endedAt'] = $incoming['endedAt'];
+            } else {
+                $state['segments'][] = $incoming;
+            }
         }
 
         $state = self::fit($state);
         self::encoded($state);
 
         return $state;
+    }
+
+    /**
+     * @param array<string, mixed> $tail
+     * @param array<string, mixed> $incoming
+     * @param array<string, mixed>|null $anchor
+     */
+    private static function continuesSegment(
+        array $tail,
+        array $incoming,
+        ?array $anchor
+    ): bool {
+        foreach (
+            ['geometryKey', 'taskZoneKey', 'passSequence',
+                'sessionSequence', 'vehicleStateCode'] as $field
+        ) {
+            if (($tail[$field] ?? null) !== $incoming[$field]) {
+                return false;
+            }
+        }
+        $last = $tail['points'][array_key_last($tail['points'])] ?? null;
+        // Only an overlapping source segment proves a connecting edge.
+        // Sequence numbers can shift when the upstream rolling window shrinks.
+        if ($anchor === null || $last !== $anchor) {
+            return false;
+        }
+        foreach ($incoming['points'] as $point) {
+            if (
+                $point['receivedAt'] <= $last['receivedAt']
+                || $point['sourceTimestamp'] <= $last['sourceTimestamp']
+            ) {
+                return false;
+            }
+            $last = $point;
+        }
+        return true;
     }
 
     /** @param array<string, mixed> $state */

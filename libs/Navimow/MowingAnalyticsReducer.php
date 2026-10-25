@@ -1306,7 +1306,6 @@ final class MowingAnalyticsReducer
                         'pointPairCount',
                         'interruptionCount',
                         'resumeCount',
-                        'areaPerformanceSquareMetersPerHour',
                     ],
                     true
                 )
@@ -1323,6 +1322,12 @@ final class MowingAnalyticsReducer
                 continue;
             }
             $result[$field] = $value;
+        }
+        if (array_key_exists('areaPerformanceSquareMetersPerHour', $result)) {
+            $result['areaPerformanceSquareMetersPerHour'] = self::areaPerformance(
+                $result['estimatedArea'],
+                $result['activeDurationSeconds']
+            );
         }
         return $result;
     }
