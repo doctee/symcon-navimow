@@ -283,16 +283,27 @@
                 coverage.textContent = Number.isFinite(
                     zone.latestRunCoveragePercent
                 )
-                    ? 'Lauf ' + formatPercent(zone.latestRunCoveragePercent)
+                    ? 'Letzter Lauf ' + formatPercent(zone.latestRunCoveragePercent)
                     : (Number.isFinite(zone.passProgressPercent)
-                        ? 'Lauf ' + formatPercent(zone.passProgressPercent)
-                        : 'Lauf –');
+                        ? 'Letzter Pass ' + formatPercent(zone.passProgressPercent)
+                        : 'Letzter Lauf –');
+                if (Number.isFinite(zone.latestRunCoveragePercent)
+                    && Number.isFinite(zone.latestRunEndedAt)) {
+                    coverage.textContent += ' (' + new Date(
+                        zone.latestRunEndedAt * 1000
+                    ).toLocaleDateString('de-DE', {
+                        day: '2-digit', month: '2-digit'
+                    }) + ')';
+                    coverage.title = 'Stand: ' + new Date(
+                        zone.latestRunEndedAt * 1000
+                    ).toLocaleString('de-DE');
+                }
                 const week = document.createElement('span');
                 week.textContent = Number.isFinite(zone.weekEstimatedArea)
                     ? 'Woche ' + formatArea(zone.weekEstimatedArea)
                     : (Number.isFinite(zone.observedArea)
-                        ? 'Fläche ' + formatArea(zone.observedArea)
-                        : 'Fläche –');
+                        ? 'Passfläche ' + formatArea(zone.observedArea)
+                        : 'Woche –');
                 row.append(title, recency, coverage, week);
                 statistics.append(row);
             });

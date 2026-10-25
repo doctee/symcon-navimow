@@ -2059,6 +2059,8 @@ class NavimowDevice extends IPSModule
                 'recencyState' => $zoneAnalytics['recencyState'] ?? 0,
                 'latestRunCoveragePercent' =>
                     $zoneAnalytics['latestRunCoveragePercent'] ?? null,
+                'latestRunEndedAt' =>
+                    $zoneAnalytics['latestRun']['endedAt'] ?? null,
                 'weekEstimatedArea' =>
                     $zoneAnalytics['weekEstimatedArea'] ?? null,
             ];
