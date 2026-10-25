@@ -284,11 +284,12 @@
                     zone.latestRunCoveragePercent
                 )
                     ? 'Letzter Lauf ' + formatPercent(zone.latestRunCoveragePercent)
-                    : (Number.isFinite(zone.passProgressPercent)
+                    : (Number.isFinite(zone.latestRunEndedAt)
+                        ? 'Letzter Lauf: nicht ermittelbar'
+                        : Number.isFinite(zone.passProgressPercent)
                         ? 'Letzter Pass ' + formatPercent(zone.passProgressPercent)
-                        : 'Letzter Lauf –');
-                if (Number.isFinite(zone.latestRunCoveragePercent)
-                    && Number.isFinite(zone.latestRunEndedAt)) {
+                        : 'Letzter Lauf: nicht ermittelbar');
+                if (Number.isFinite(zone.latestRunEndedAt)) {
                     coverage.textContent += ' (' + new Date(
                         zone.latestRunEndedAt * 1000
                     ).toLocaleDateString('de-DE', {
@@ -303,7 +304,7 @@
                     ? 'Woche ' + formatArea(zone.weekEstimatedArea)
                     : (Number.isFinite(zone.observedArea)
                         ? 'Passfläche ' + formatArea(zone.observedArea)
-                        : 'Woche –');
+                        : 'Woche: nicht ermittelbar');
                 row.append(title, recency, coverage, week);
                 statistics.append(row);
             });
