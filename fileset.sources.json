@@ -73,8 +73,8 @@
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/local-map.js",
             "target": "NavimowDevice/local-map.js",
-            "sha256": "25aa47190cca2aafdb5509b6782e0c5ec3de14945dede10aae4210fe97ef6298",
-            "bytes": 17356
+            "sha256": "0c04be28a8e029fd7e4af409b14f2c3acc6a0ce9f6a4df7897070e96d80c54ca",
+            "bytes": 17441
         },
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/locale.json",
@@ -157,8 +157,8 @@
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/MowingAnalyticsReducer.php",
             "target": "libs/Navimow/MowingAnalyticsReducer.php",
-            "sha256": "12ad82b6dabe002648e4540f227486b55cf8ab063980942fece19432ccbefb81",
-            "bytes": 63556
+            "sha256": "a4e5522f7e798316c47cddeb305b980585124ba866e4bb5a433716e708322860",
+            "bytes": 63940
         },
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/MqttContinuousOperationReducer.php",
@@ -263,7 +263,7 @@
             "bytes": 3780
         }
     ],
-    "filesetSha256": "8532b15df62041eb995e325db18cd85da2190629cc3d42d48bb47ff61662ea34",
+    "filesetSha256": "c83ac34d7947280442952e10c0846d220686653abd05e320d17ba51f1d83b8b9",
     "builderVersion": "1.0.0",
     "license": {
         "identifier": "PolyForm-Noncommercial-1.0.0",

@@ -215,6 +215,14 @@ final class MowingAnalyticsReducer
         $today = $clock->format('Y-m-d');
         $weekStart = $clock->modify('monday this week')->format('Y-m-d');
         $monthPrefix = $clock->format('Y-m-');
+        // Legacy zero areas carry no proof of covered cells, not proof of no mowing.
+        foreach ($revision['runs'] as &$run) {
+            if (in_array($run['estimatedArea'] ?? null, [0, 0.0], true)) {
+                $run['estimatedArea'] = null;
+                $run['areaPerformanceSquareMetersPerHour'] = null;
+            }
+        }
+        unset($run);
         $latestRun = null;
         foreach ($revision['runs'] as $run) {
             if ($latestRun === null || $run['endedAt'] > $latestRun['endedAt']) {
@@ -1398,7 +1406,7 @@ final class MowingAnalyticsReducer
             }
             $row = self::rowByKey($day['zones'] ?? [], 'zoneKey', $zoneKey);
             $area = $row['estimatedArea'] ?? null;
-            if (!is_float($area) && !is_int($area)) {
+            if ((!is_float($area) && !is_int($area)) || $area <= 0.0) {
                 continue;
             }
             if ($day['date'] === $today) {
