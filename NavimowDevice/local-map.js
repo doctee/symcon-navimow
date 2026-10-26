@@ -279,16 +279,35 @@
                 title.textContent = entry.label;
                 const recency = document.createElement('span');
                 recency.textContent = recencyText(zone);
+                const pass = document.createElement('span');
+                pass.textContent = (zone.passIsCurrent === true
+                    ? 'Aktueller Durchgang: '
+                    : 'Letzter Durchgang: ')
+                    + (Number.isFinite(zone.passProgressPercent)
+                        ? formatPercent(zone.passProgressPercent)
+                        : 'unbekannt');
+                if (Number.isFinite(zone.passObservedAt)) {
+                    pass.title = 'Beobachtet: ' + new Date(
+                        zone.passObservedAt * 1000
+                    ).toLocaleString('de-DE');
+                    if (zone.passIsCurrent !== true) {
+                        pass.textContent += ' (' + new Date(
+                            zone.passObservedAt * 1000
+                        ).toLocaleDateString('de-DE', {
+                            day: '2-digit', month: '2-digit'
+                        }) + ')';
+                    }
+                }
+                const passArea = document.createElement('span');
+                passArea.textContent = Number.isFinite(zone.observedArea)
+                    ? 'Passfläche ' + formatArea(zone.observedArea)
+                    : 'Passfläche: unbekannt';
                 const coverage = document.createElement('span');
                 coverage.textContent = Number.isFinite(
                     zone.latestRunCoveragePercent
                 )
                     ? 'Letzter Lauf ' + formatPercent(zone.latestRunCoveragePercent)
-                    : (Number.isFinite(zone.latestRunEndedAt)
-                        ? 'Letzter Lauf: nicht ermittelbar'
-                        : Number.isFinite(zone.passProgressPercent)
-                        ? 'Letzter Pass ' + formatPercent(zone.passProgressPercent)
-                        : 'Letzter Lauf: nicht ermittelbar');
+                    : 'Letzter Lauf: nicht ermittelbar';
                 if (Number.isFinite(zone.latestRunEndedAt)) {
                     coverage.textContent += ' (' + new Date(
                         zone.latestRunEndedAt * 1000
@@ -302,10 +321,8 @@
                 const week = document.createElement('span');
                 week.textContent = Number.isFinite(zone.weekEstimatedArea)
                     ? 'Woche ' + formatArea(zone.weekEstimatedArea)
-                    : (Number.isFinite(zone.observedArea)
-                        ? 'Passfläche ' + formatArea(zone.observedArea)
-                        : 'Woche: nicht ermittelbar');
-                row.append(title, recency, coverage, week);
+                    : 'Woche: nicht ermittelbar';
+                row.append(title, pass, passArea, recency, coverage, week);
                 statistics.append(row);
             });
         scheduleStatisticsLayout();

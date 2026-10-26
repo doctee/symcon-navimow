@@ -24,7 +24,8 @@ final class MowingAnalyticsReducer
     private const MAX_COVERAGE_SAMPLES = 250000;
     private const MAX_SERIALIZED_BYTES = 524288;
     private const MAX_PAIR_GAP_SECONDS = 300;
-    private const RUNNING_STATE = 1;
+    // MQTT location codes are not the REST VehicleState enumeration.
+    private const MQTT_LOCATION_RUNNING_STATE = 4;
 
     /** @return array<string, mixed> */
     public static function initialState(): array
@@ -374,7 +375,7 @@ final class MowingAnalyticsReducer
                 ? $policy['coverageCellSizeMeters']
                 : null,
             'denominator' => 'manufacturer-reported-net-zone-area',
-            'cuttingStateEvidence' => 'vehicle-state-running-candidate',
+            'cuttingStateEvidence' => 'mqtt-location-code-4-running-candidate',
             'accuracyClaim' => 'estimate-not-measurement',
         ];
     }
@@ -400,7 +401,7 @@ final class MowingAnalyticsReducer
         try {
             $encoded = json_encode(
                 [
-                    'algorithmVersion' => 1,
+                    'algorithmVersion' => 2,
                     'geometryKey' => $geometryKey,
                     'timeZone' => $policy['timeZone'],
                     'metersPerLocalUnit' =>
@@ -447,7 +448,10 @@ final class MowingAnalyticsReducer
         }
 
         foreach ($input['pathSegments'] as $segment) {
-            if ($segment['vehicleStateCode'] !== self::RUNNING_STATE) {
+            if (
+                $segment['vehicleStateCode']
+                    !== self::MQTT_LOCATION_RUNNING_STATE
+            ) {
                 continue;
             }
             $points = $segment['points'];
