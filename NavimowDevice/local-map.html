@@ -19,6 +19,16 @@
         <button type="button" data-follow title="Mäher folgen">Mäher</button>
     </nav>
     <section class="nav-map__statistics" data-statistics aria-label="Mähstatistik"></section>
+    <dialog class="nav-map__details" data-statistics-details aria-labelledby="nav-details-title">
+        <header>
+            <h2 id="nav-details-title" data-details-title></h2>
+            <button type="button" data-details-close aria-label="Details schließen" title="Schließen" autofocus>×</button>
+        </header>
+        <dl data-details-values></dl>
+        <p>Abdeckung: geschätzter Flächenanteil desselben Durchgangs.
+            Woche: Summe der täglichen Flächenschätzungen dieser Kalenderwoche;
+            an mehreren Tagen gemähte Flächen zählen mehrfach.</p>
+    </dialog>
     <output class="nav-map__status" data-status role="status" aria-live="polite"></output>
 </main>
 <script>/* SAEF_NAVIMOW_MAP_SCRIPT */</script>
