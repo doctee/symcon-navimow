@@ -93,6 +93,27 @@ diagnostic estimates derived from receive-only MQTT positions, not blade-state
 measurements. Week and month totals sum daily unique-cell estimates, so land
 mowed on different days counts once per day.
 
+The map statistics show task-observed pass progress and pass area separately
+from geometric last-run coverage and weekly area. A pass is labelled current
+only while its observation is no more than 300 seconds old, completion has not
+been observed, and the fresh REST-derived mower state is active. Older pass
+observations retain their date. Unknown geometric results remain explicitly
+unknown; pass area is not a substitute for geometric coverage or weekly area.
+
+The geometric reducer accepts MQTT location segments with code 4, supported by
+the same-session Running/Docking/Docked correlation in case-study step 90.
+This is diagnostic mowing evidence, not a blade-state measurement or a complete
+vendor enum. Raw MQTT position codes do not share the REST enumeration: code 1
+is not accepted as Running; code 5 (observed return), code 2 (observed dock) and
+all other codes are excluded. REST remains the public state authority.
+
+Algorithm version 2 separates corrected aggregates from version-1 results.
+Old revisions remain subject to the existing bounded retention policy but are
+not projected as current results. The next natural map update recomputes from
+retained position segments only; evicted history cannot be reconstructed.
+Existing Archive records are not rewritten. Current REST state is never applied
+retroactively to historical points.
+
 The module never changes Archive Control logging or aggregation. Existing
 logging remains attached to stable variables. Logging for new analytics
 variables is an installation-owned operation after a supported module update

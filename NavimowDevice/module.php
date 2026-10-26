@@ -2049,12 +2049,22 @@ class NavimowDevice extends IPSModule
                     ? $zone['statistics']['latestPass']
                     : [];
             $zoneAnalytics = $analyticsByKey[$zone['zoneKey']] ?? [];
+            $passObservedAt = $latestPass['lastObservedAt'] ?? null;
+            $passAge = is_int($passObservedAt)
+                ? $this->currentTimestamp() - $passObservedAt
+                : null;
             $result[] = [
                 'zoneId' => $zone['zoneId'],
                 'label' => $zone['label'],
                 'passProgressPercent' =>
                     $latestPass['passProgressPercent'] ?? null,
                 'observedArea' => $latestPass['observedAreaDelta'] ?? null,
+                'passObservedAt' => $passObservedAt,
+                'passIsCurrent' => $passAge !== null
+                    && $passAge >= 0
+                    && $passAge <= self::LOCAL_MAP_REST_STALE_SECONDS
+                    && ($latestPass['completionObserved'] ?? null) === false
+                    && $this->localMapMowerState() === 'active',
                 'recencyDays' => $zoneAnalytics['recencyDays'] ?? null,
                 'recencyState' => $zoneAnalytics['recencyState'] ?? 0,
                 'latestRunCoveragePercent' =>
