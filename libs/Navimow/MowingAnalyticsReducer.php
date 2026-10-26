@@ -401,7 +401,7 @@ final class MowingAnalyticsReducer
         try {
             $encoded = json_encode(
                 [
-                    'algorithmVersion' => 2,
+                    'algorithmVersion' => 3,
                     'geometryKey' => $geometryKey,
                     'timeZone' => $policy['timeZone'],
                     'metersPerLocalUnit' =>
@@ -592,8 +592,11 @@ final class MowingAnalyticsReducer
 
         $cellArea = $policy['coverageCellSizeMeters'] ** 2;
         foreach ($days as $date => &$day) {
+            $day['coverageTruncated'] = $coverageTruncated;
             foreach ($day['zones'] as $zoneKey => &$row) {
-                $row['estimatedArea'] = $policy['cuttingWidthMeters'] > 0.0
+                $row['coverageTruncated'] = $coverageTruncated;
+                $row['estimatedArea'] = !$coverageTruncated
+                    && $policy['cuttingWidthMeters'] > 0.0
                     ? count($dayCells[$date][$zoneKey] ?? []) * $cellArea
                     : null;
             }
@@ -601,7 +604,9 @@ final class MowingAnalyticsReducer
             foreach ($policy['subareas'] as $subarea) {
                 $day['subareas'][] = [
                     'subareaKey' => $subarea['key'],
-                    'estimatedArea' => $policy['cuttingWidthMeters'] > 0.0
+                    'coverageTruncated' => $coverageTruncated,
+                    'estimatedArea' => !$coverageTruncated
+                        && $policy['cuttingWidthMeters'] > 0.0
                         ? count(
                             $subareaDayCells[$date][$subarea['key']] ?? []
                         ) * $cellArea
@@ -614,7 +619,8 @@ final class MowingAnalyticsReducer
         }
         unset($day);
         foreach ($runs as $runKey => &$run) {
-            $run['estimatedArea'] = $policy['cuttingWidthMeters'] > 0.0
+            $run['estimatedArea'] = !$coverageTruncated
+                && $policy['cuttingWidthMeters'] > 0.0
                 ? count($runCells[$runKey] ?? []) * $cellArea
                 : null;
             $run['coverageTruncated'] = $coverageTruncated;
@@ -665,29 +671,51 @@ final class MowingAnalyticsReducer
         if ($length <= 0.0) {
             return [];
         }
-        $nx = -$dy / $length;
-        $ny = $dx / $length;
-        $alongSteps = max(1, (int) ceil($length / ($cellLocal / 2.0)));
-        $acrossSteps = max(
-            1,
-            (int) ceil((2.0 * $halfWidthLocal) / ($cellLocal / 2.0))
-        );
+        $nx = -$dy / $length * $halfWidthLocal;
+        $ny = $dx / $length * $halfWidthLocal;
+        $corners = [
+            [$left['localX'] + $nx, $left['localY'] + $ny],
+            [$right['localX'] + $nx, $right['localY'] + $ny],
+            [$right['localX'] - $nx, $right['localY'] - $ny],
+            [$left['localX'] - $nx, $left['localY'] - $ny],
+        ];
+        $firstRow = (int) ceil(min(array_column($corners, 1)) / $cellLocal - 0.5);
+        $lastRow = (int) floor(max(array_column($corners, 1)) / $cellLocal - 0.5);
         $result = [];
-        for ($along = 0; $along <= $alongSteps; ++$along) {
-            $ratio = $along / $alongSteps;
-            $x = $left['localX'] + $dx * $ratio;
-            $y = $left['localY'] + $dy * $ratio;
-            for ($across = 0; $across <= $acrossSteps; ++$across) {
-                ++$sampleCount;
-                if ($sampleCount > self::MAX_COVERAGE_SAMPLES) {
+        // Scan the swept rectangle by grid rows, not repeated sub-cell samples.
+        for ($iy = $firstRow; $iy <= $lastRow; ++$iy) {
+            if ($sampleCount >= self::MAX_COVERAGE_SAMPLES) {
+                $truncated = true;
+                return $result;
+            }
+            ++$sampleCount; // Empty rows also consume work budget.
+            $y = ($iy + 0.5) * $cellLocal;
+            $crossings = [];
+            for ($edge = 0; $edge < 4; ++$edge) {
+                $a = $corners[$edge];
+                $b = $corners[($edge + 1) % 4];
+                if ($y < min($a[1], $b[1]) || $y > max($a[1], $b[1])) {
+                    continue;
+                }
+                if ($a[1] === $b[1]) {
+                    $crossings[] = $a[0];
+                    $crossings[] = $b[0];
+                } else {
+                    $crossings[] = $a[0]
+                        + ($y - $a[1]) / ($b[1] - $a[1]) * ($b[0] - $a[0]);
+                }
+            }
+            if ($crossings === []) {
+                continue;
+            }
+            $firstColumn = (int) ceil(min($crossings) / $cellLocal - 0.5);
+            $lastColumn = (int) floor(max($crossings) / $cellLocal - 0.5);
+            for ($ix = $firstColumn; $ix <= $lastColumn; ++$ix) {
+                if ($sampleCount >= self::MAX_COVERAGE_SAMPLES) {
                     $truncated = true;
                     return $result;
                 }
-                $offset = -$halfWidthLocal
-                    + (2.0 * $halfWidthLocal * $across / $acrossSteps);
-                $sample = [$x + $nx * $offset, $y + $ny * $offset];
-                $ix = (int) floor($sample[0] / $cellLocal);
-                $iy = (int) floor($sample[1] / $cellLocal);
+                ++$sampleCount;
                 $center = [
                     ($ix + 0.5) * $cellLocal,
                     ($iy + 0.5) * $cellLocal,
@@ -1335,6 +1363,11 @@ final class MowingAnalyticsReducer
             }
             $result[$field] = $value;
         }
+        if (($result['coverageTruncated'] ?? false) === true) {
+            if (array_key_exists('estimatedArea', $result)) {
+                $result['estimatedArea'] = null;
+            }
+        }
         if (array_key_exists('areaPerformanceSquareMetersPerHour', $result)) {
             $result['areaPerformanceSquareMetersPerHour'] = self::areaPerformance(
                 $result['estimatedArea'],
@@ -1404,11 +1437,24 @@ final class MowingAnalyticsReducer
             'weekEstimatedArea' => null,
             'monthEstimatedArea' => null,
         ];
+        $incomplete = [];
         foreach ($days as $day) {
             if (!is_array($day) || !is_string($day['date'] ?? null)) {
                 continue;
             }
             $row = self::rowByKey($day['zones'] ?? [], 'zoneKey', $zoneKey);
+            if (($row['coverageTruncated'] ?? false) === true) {
+                if ($day['date'] === $today) {
+                    $incomplete['todayEstimatedArea'] = true;
+                }
+                if ($day['date'] >= $weekStart && $day['date'] <= $today) {
+                    $incomplete['weekEstimatedArea'] = true;
+                }
+                if (str_starts_with($day['date'], $monthPrefix)) {
+                    $incomplete['monthEstimatedArea'] = true;
+                }
+                continue;
+            }
             $area = $row['estimatedArea'] ?? null;
             if ((!is_float($area) && !is_int($area)) || $area <= 0.0) {
                 continue;
@@ -1424,6 +1470,9 @@ final class MowingAnalyticsReducer
                 $result['monthEstimatedArea'] =
                     ($result['monthEstimatedArea'] ?? 0.0) + $area;
             }
+        }
+        foreach ($incomplete as $field => $_) {
+            $result[$field] = null;
         }
         return $result;
     }
@@ -1443,12 +1492,22 @@ final class MowingAnalyticsReducer
             $weekArea = null;
             $monthArea = null;
             $lastMowedAt = null;
+            $incompleteToday = false;
+            $incompleteWeek = false;
+            $incompleteMonth = false;
             foreach ($revision['days'] as $day) {
                 $row = self::rowByKey(
                     $day['subareas'] ?? [],
                     'subareaKey',
                     $definition['key']
                 );
+                if (($row['coverageTruncated'] ?? false) === true) {
+                    $incompleteToday = $incompleteToday || $day['date'] === $today;
+                    $incompleteWeek = $incompleteWeek
+                        || ($day['date'] >= $weekStart && $day['date'] <= $today);
+                    $incompleteMonth = $incompleteMonth
+                        || str_starts_with($day['date'], $monthPrefix);
+                }
                 $area = $row['estimatedArea'] ?? null;
                 if (!is_int($area) && !is_float($area)) {
                     $area = null;
@@ -1486,14 +1545,15 @@ final class MowingAnalyticsReducer
                 'key' => $definition['key'],
                 'zoneKey' => $definition['zoneKey'],
                 'label' => $definition['label'],
-                'todayEstimatedArea' => $todayArea,
-                'weekEstimatedArea' => $weekArea,
-                'monthEstimatedArea' => $monthArea,
+                'todayEstimatedArea' => $incompleteToday ? null : $todayArea,
+                'weekEstimatedArea' => $incompleteWeek ? null : $weekArea,
+                'monthEstimatedArea' => $incompleteMonth ? null : $monthArea,
                 'lastMowedAt' => $lastMowedAt,
                 'recencyDays' => $recencyDays,
                 'recencyState' => self::recencyState($recencyDays, $policy),
                 'projectedAt' => $now,
-                'quality' => $policy['cuttingWidthMeters'] > 0.0 ? 2 : 0,
+                'quality' => $incompleteMonth ? 1
+                    : ($policy['cuttingWidthMeters'] > 0.0 ? 2 : 0),
             ];
         }
         return $result;
