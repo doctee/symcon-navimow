@@ -153,7 +153,8 @@ body {
     grid-template-columns: minmax(0, 1fr);
     gap: 1px;
     min-width: 112px;
-    max-width: 160px;
+    width: max-content;
+    flex: 0 0 auto;
     padding: 4px 7px;
     border-right: 1px solid var(--nav-border);
     font-size: 11px;
@@ -170,8 +171,7 @@ body {
 .nav-map__zone-stat span {
     display: block;
     min-width: 0;
-    overflow-wrap: anywhere;
-    white-space: normal;
+    white-space: nowrap;
 }
 
 .nav-map__status {
