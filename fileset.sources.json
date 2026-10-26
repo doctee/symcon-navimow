@@ -157,8 +157,8 @@
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/MowingAnalyticsReducer.php",
             "target": "libs/Navimow/MowingAnalyticsReducer.php",
-            "sha256": "3122c5ecee5a0822481af89c683573a9df04e162915af6efa53087175d58aa59",
-            "bytes": 64095
+            "sha256": "e9cc734a9162513df38b8d4560cbc985b0f2cf58723861c83f721e0123e9af91",
+            "bytes": 66913
         },
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/MqttContinuousOperationReducer.php",
@@ -263,7 +263,7 @@
             "bytes": 3780
         }
     ],
-    "filesetSha256": "2e906ad9d53e943dd67cb9770f3a36939ceb9e4d5cc07ea1c0081ac49280c17c",
+    "filesetSha256": "e49c9b582222f9b5d4d0503a8f2b0eb791c06bbbb5acdc56a43de94a797ced68",
     "builderVersion": "1.0.0",
     "license": {
         "identifier": "PolyForm-Noncommercial-1.0.0",
