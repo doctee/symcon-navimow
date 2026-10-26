@@ -9,6 +9,9 @@
     const stage = root.querySelector('[data-map-stage]');
     const status = root.querySelector('[data-status]');
     const statistics = root.querySelector('[data-statistics]');
+    const details = root.querySelector('[data-statistics-details]');
+    const detailsTitle = details.querySelector('[data-details-title]');
+    const detailsValues = details.querySelector('[data-details-values]');
     const followButton = root.querySelector('[data-follow]');
     const pointers = new Map();
     const viewportEdgeInset = 6;
@@ -26,6 +29,7 @@
         pinch: null,
         legendFrame: null,
         statisticsFrame: null,
+        detailsZoneId: null,
     };
 
     function alignLegendRight()
@@ -258,53 +262,133 @@
         };
     }
 
+    function compactArea(value)
+    {
+        if (!Number.isFinite(value)) {
+            return '–';
+        }
+        const hectares = value >= 999.5;
+        return new Intl.NumberFormat('de-DE', {
+            maximumFractionDigits: hectares ? (value >= 10000 ? 1 : 2) : 0,
+        }).format(hectares ? value / 10000 : value) + (hectares ? ' ha' : ' m²');
+    }
+
+    function detailsArea(value)
+    {
+        return Number.isFinite(value)
+            ? new Intl.NumberFormat('de-DE', {maximumFractionDigits : 2})
+                .format(value) + ' m²'
+            : 'Nicht ermittelbar';
+    }
+
+    function showStatisticsDetails(entry)
+    {
+        const zone = entry.zone;
+        state.detailsZoneId = String(zone.zoneId);
+        detailsTitle.textContent = entry.label;
+        const rows = [
+            ['Status', zone.passIsCurrent === true ? 'Aktueller Mählauf' : 'Zuletzt erfasster Stand'],
+            ['Beobachtet', Number.isFinite(zone.passObservedAt)
+                ? new Date(zone.passObservedAt * 1000).toLocaleString('de-DE') : 'Nicht ermittelbar'],
+            ['Passfortschritt · gemeldet', Number.isFinite(zone.passProgressPercent)
+                ? formatPercent(zone.passProgressPercent) : 'Nicht ermittelbar'],
+            ['Passfläche · gemeldet', detailsArea(zone.observedArea)],
+            ['Abdeckung · geschätzt', Number.isFinite(zone.passCoveragePercent)
+                ? '≈ ' + formatPercent(zone.passCoveragePercent) : 'Nicht ermittelbar'],
+            ['Mähfläche Woche · geschätzt', Number.isFinite(zone.weekEstimatedArea)
+                ? '≈ ' + detailsArea(zone.weekEstimatedArea) : 'Nicht ermittelbar'],
+        ];
+        detailsValues.replaceChildren();
+        rows.forEach(function (values) {
+            const term = document.createElement('dt');
+            const value = document.createElement('dd');
+            term.textContent = values[0];
+            value.textContent = values[1];
+            detailsValues.append(term, value);
+        });
+        if (!details.open) {
+            details.showModal();
+        }
+    }
+
     function renderStatistics(zones)
     {
         statistics.replaceChildren();
         const entries = Array.isArray(zones) ? zones : [];
+        let selectedEntry = null;
         entries.map(zonePresentation)
             .sort(function (left, right) {
                 return left.centerX - right.centerX || left.index - right.index;
             })
             .forEach(function (entry) {
                 const zone = entry.zone;
-                const row = document.createElement('div');
+                const row = document.createElement('button');
+                row.type = 'button';
                 row.className = 'nav-map__zone-stat';
                 row.dataset.zoneId = String(zone.zoneId === undefined || zone.zoneId === null ? '' : zone.zoneId);
                 row.dataset.recency = String(zone.recencyState || 0);
+                row.setAttribute('aria-haspopup', 'dialog');
+                row.setAttribute('aria-label', entry.label + ' · Statistikdetails');
                 if (entry.color !== '') {
                     row.style.setProperty('--nav-zone-color', entry.color);
                 }
+                const date = Number.isFinite(zone.passObservedAt)
+                    ? new Date(zone.passObservedAt * 1000).toLocaleDateString(
+                        'de-DE',
+                        {day: '2-digit', month: '2-digit'}
+                    ) : '–';
                 const title = document.createElement('strong');
-                title.textContent = entry.label;
+                title.textContent = entry.label + ' · '
+                    + (zone.passIsCurrent === true ? 'aktuell' : date);
+                title.title = title.textContent;
                 const pass = document.createElement('span');
                 pass.className = 'nav-map__status-line';
-                pass.textContent = (zone.passIsCurrent === true ? 'aktuell ' : 'zuletzt ')
-                    + (Number.isFinite(zone.passProgressPercent)
-                        ? formatPercent(zone.passProgressPercent) : '–');
-                if (Number.isFinite(zone.passCoveragePercent)) {
-                    pass.textContent += ' (≈ ' + formatPercent(zone.passCoveragePercent) + ')';
-                }
-                pass.textContent += ' · ' + (Number.isFinite(zone.observedArea)
-                    ? formatArea(zone.observedArea) : '–');
-                if (Number.isFinite(zone.passObservedAt)) {
-                    pass.textContent += ' · ' + new Date(
-                        zone.passObservedAt * 1000
-                    ).toLocaleDateString('de-DE', {day: '2-digit', month: '2-digit'});
-                }
-                pass.title = 'Gemeldeter Passfortschritt · (geschätzte geometrische Abdeckung desselben Durchgangs)'
-                    + ' · gemeldete Passfläche · Datum der letzten Beobachtung';
+                pass.textContent = (Number.isFinite(zone.passProgressPercent)
+                    ? formatPercent(zone.passProgressPercent) : '–')
+                    + ' · ' + compactArea(zone.observedArea);
                 const week = document.createElement('span');
                 week.className = 'nav-map__status-line';
-                week.textContent = 'Mähfläche Woche ' + (Number.isFinite(zone.weekEstimatedArea)
-                    ? '≈ ' + formatArea(zone.weekEstimatedArea) : '–');
-                week.title = 'Summe der täglichen Flächenschätzungen dieser Kalenderwoche.'
-                    + ' An verschiedenen Tagen erneut gemähte Flächen zählen mehrfach.';
+                week.textContent = 'Woche ' + (Number.isFinite(zone.weekEstimatedArea)
+                    ? '≈ ' + compactArea(zone.weekEstimatedArea) : '–');
                 row.append(title, pass, week);
+                row.addEventListener('click', function () {
+                    showStatisticsDetails(entry);
+                });
                 statistics.append(row);
+                if (row.dataset.zoneId === state.detailsZoneId) {
+                    selectedEntry = entry;
+                }
             });
+        if (details.open) {
+            if (selectedEntry) {
+                showStatisticsDetails(selectedEntry);
+            } else {
+                details.close();
+            }
+        }
         scheduleStatisticsLayout();
     }
+
+    details.querySelector('[data-details-close]').addEventListener('click', function () {
+        details.close();
+    });
+    details.addEventListener('click', function (event) {
+        const rect = details.getBoundingClientRect();
+        if (event.target === details && (event.clientX < rect.left
+            || event.clientX > rect.right || event.clientY < rect.top
+            || event.clientY > rect.bottom)) {
+            details.close();
+        }
+    });
+    details.addEventListener('close', function () {
+        const button = Array.from(statistics.children).find(function (row) {
+            return row.dataset.zoneId === state.detailsZoneId;
+        });
+        state.detailsZoneId = null;
+        if (button) {
+            button.focus({preventScroll: true});
+        }
+    });
 
     function render(payload)
     {
@@ -353,6 +437,7 @@
                 return;
             }
             if (payload.action === 'configurationError') {
+                details.close();
                 stage.replaceChildren();
                 statistics.replaceChildren();
                 scheduleStatisticsLayout();
@@ -360,6 +445,7 @@
                 return;
             }
         } catch (error) {
+            details.close();
             status.textContent = error instanceof Error
                 ? error.message
                 : 'Karte nicht verfügbar';
@@ -459,6 +545,10 @@
         scheduleStatisticsLayout();
         scheduleLegendAlignment();
     });
+    if (document.fonts) {
+        document.fonts.ready.then(scheduleStatisticsLayout);
+        document.fonts.addEventListener('loadingdone', scheduleStatisticsLayout);
+    }
     if (typeof ResizeObserver === 'function') {
         const statisticsObserver = new ResizeObserver(scheduleStatisticsLayout);
         statisticsObserver.observe(statistics);
