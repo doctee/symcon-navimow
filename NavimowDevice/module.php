@@ -2049,6 +2049,13 @@ class NavimowDevice extends IPSModule
                     ? $zone['statistics']['latestPass']
                     : [];
             $zoneAnalytics = $analyticsByKey[$zone['zoneKey']] ?? [];
+            $latestRun = $zoneAnalytics['latestRun'] ?? [];
+            $samePass = is_int($latestPass['passSequence'] ?? null)
+                && $latestPass['passSequence'] > 0
+                && ($latestRun['passSequence'] ?? null) === $latestPass['passSequence']
+                && is_int($latestPass['startedAt'] ?? null)
+                && is_int($latestRun['startedAt'] ?? null)
+                && $latestRun['startedAt'] >= $latestPass['startedAt'];
             $passObservedAt = $latestPass['lastObservedAt'] ?? null;
             $passAge = is_int($passObservedAt)
                 ? $this->currentTimestamp() - $passObservedAt
@@ -2059,6 +2066,9 @@ class NavimowDevice extends IPSModule
                 'passProgressPercent' =>
                     $latestPass['passProgressPercent'] ?? null,
                 'observedArea' => $latestPass['observedAreaDelta'] ?? null,
+                'passCoveragePercent' => $samePass
+                    ? ($zoneAnalytics['latestRunCoveragePercent'] ?? null)
+                    : null,
                 'passObservedAt' => $passObservedAt,
                 'passIsCurrent' => $passAge !== null
                     && $passAge >= 0

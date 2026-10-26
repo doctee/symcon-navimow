@@ -277,52 +277,30 @@
                 }
                 const title = document.createElement('strong');
                 title.textContent = entry.label;
-                const recency = document.createElement('span');
-                recency.textContent = recencyText(zone);
                 const pass = document.createElement('span');
-                pass.textContent = (zone.passIsCurrent === true
-                    ? 'Aktueller Durchgang: '
-                    : 'Letzter Durchgang: ')
+                pass.className = 'nav-map__status-line';
+                pass.textContent = (zone.passIsCurrent === true ? 'aktuell ' : 'zuletzt ')
                     + (Number.isFinite(zone.passProgressPercent)
-                        ? formatPercent(zone.passProgressPercent)
-                        : 'unbekannt');
+                        ? formatPercent(zone.passProgressPercent) : '–');
+                if (Number.isFinite(zone.passCoveragePercent)) {
+                    pass.textContent += ' (≈ ' + formatPercent(zone.passCoveragePercent) + ')';
+                }
+                pass.textContent += ' · ' + (Number.isFinite(zone.observedArea)
+                    ? formatArea(zone.observedArea) : '–');
                 if (Number.isFinite(zone.passObservedAt)) {
-                    pass.title = 'Beobachtet: ' + new Date(
+                    pass.textContent += ' · ' + new Date(
                         zone.passObservedAt * 1000
-                    ).toLocaleString('de-DE');
-                    if (zone.passIsCurrent !== true) {
-                        pass.textContent += ' (' + new Date(
-                            zone.passObservedAt * 1000
-                        ).toLocaleDateString('de-DE', {
-                            day: '2-digit', month: '2-digit'
-                        }) + ')';
-                    }
+                    ).toLocaleDateString('de-DE', {day: '2-digit', month: '2-digit'});
                 }
-                const passArea = document.createElement('span');
-                passArea.textContent = Number.isFinite(zone.observedArea)
-                    ? 'Passfläche ' + formatArea(zone.observedArea)
-                    : 'Passfläche: unbekannt';
-                const coverage = document.createElement('span');
-                coverage.textContent = Number.isFinite(
-                    zone.latestRunCoveragePercent
-                )
-                    ? 'Letzter Lauf ' + formatPercent(zone.latestRunCoveragePercent)
-                    : 'Letzter Lauf: nicht ermittelbar';
-                if (Number.isFinite(zone.latestRunEndedAt)) {
-                    coverage.textContent += ' (' + new Date(
-                        zone.latestRunEndedAt * 1000
-                    ).toLocaleDateString('de-DE', {
-                        day: '2-digit', month: '2-digit'
-                    }) + ')';
-                    coverage.title = 'Stand: ' + new Date(
-                        zone.latestRunEndedAt * 1000
-                    ).toLocaleString('de-DE');
-                }
+                pass.title = 'Gemeldeter Passfortschritt · (geschätzte geometrische Abdeckung desselben Durchgangs)'
+                    + ' · gemeldete Passfläche · Datum der letzten Beobachtung';
                 const week = document.createElement('span');
-                week.textContent = Number.isFinite(zone.weekEstimatedArea)
-                    ? 'Woche ' + formatArea(zone.weekEstimatedArea)
-                    : 'Woche: nicht ermittelbar';
-                row.append(title, pass, passArea, recency, coverage, week);
+                week.className = 'nav-map__status-line';
+                week.textContent = 'Mähfläche Woche ' + (Number.isFinite(zone.weekEstimatedArea)
+                    ? '≈ ' + formatArea(zone.weekEstimatedArea) : '–');
+                week.title = 'Summe der täglichen Flächenschätzungen dieser Kalenderwoche.'
+                    + ' An verschiedenen Tagen erneut gemähte Flächen zählen mehrfach.';
+                row.append(title, pass, week);
                 statistics.append(row);
             });
         scheduleStatisticsLayout();
