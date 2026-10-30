@@ -13,6 +13,12 @@ final class LocalMapSvgRenderer
     private const MAX_SEGMENTS = 64;
     private const MAX_POINTS = 8192;
     private const MAX_OUTPUT_BYTES = 1024 * 1024;
+    private const DARK_TRACK_COLORS = [
+        '#8396a8', '#839e90', '#a79b80', '#a38a9a', '#8f90a6', '#819e99',
+    ];
+    private const LIGHT_TRACK_COLORS = [
+        '#697d91', '#6d8978', '#958565', '#96788b', '#777992', '#658880',
+    ];
     private const LIGHT_COLORS = [
         ['fill' => '#dbeafe', 'stroke' => '#2563eb'],
         ['fill' => '#dcfce7', 'stroke' => '#16a34a'],
@@ -68,6 +74,7 @@ final class LocalMapSvgRenderer
         }
         $pointCount = 0;
         $zoneMarkup = [];
+        $trackColorMarkup = [];
         $labelMarkup = [];
         foreach ($scene['zones'] as $index => $zone) {
             if (!is_array($zone)) {
@@ -79,6 +86,14 @@ final class LocalMapSvgRenderer
                 ? self::DARK_COLORS
                 : self::LIGHT_COLORS;
             $color = $colors[$index % count($colors)];
+            $trackColors = $presentation['theme'] === 'dark'
+                ? self::DARK_TRACK_COLORS
+                : self::LIGHT_TRACK_COLORS;
+            $trackColorMarkup[] = sprintf(
+                '<polygon points="%s" fill="%s"/>',
+                self::points($ring, $viewport),
+                $trackColors[$index % count($trackColors)]
+            );
             $zoneId = is_int($zone['zoneId'] ?? null)
                 ? $zone['zoneId']
                 : $index + 1;
@@ -352,6 +367,32 @@ final class LocalMapSvgRenderer
 
         $legendMarkup = self::legendMarkup($viewport, $presentation);
 
+        // Paint the original path by the surface beneath it, without new points.
+        $trackPaintId = 'track-paint-' . substr(hash(
+            'sha256',
+            implode('', $trackColorMarkup) . $presentation['theme']
+        ), 0, 16);
+        $trackPaint = sprintf(
+            '<defs><pattern id="%s" patternUnits="userSpaceOnUse" x="%s" y="%s" width="%s" height="%s" viewBox="%s" preserveAspectRatio="none"><rect x="%s" y="%s" width="%s" height="%s" fill="%s"/>%s</pattern></defs>',
+            $trackPaintId,
+            self::number($viewport['minimumX']),
+            self::number($viewport['minimumY']),
+            self::number($viewport['width']),
+            self::number($viewport['height']),
+            implode(' ', array_map([self::class, 'number'], [
+                $viewport['minimumX'],
+                $viewport['minimumY'],
+                $viewport['width'],
+                $viewport['height'],
+            ])),
+            self::number($viewport['minimumX']),
+            self::number($viewport['minimumY']),
+            self::number($viewport['width']),
+            self::number($viewport['height']),
+            $presentation['theme'] === 'dark' ? '#939a9d' : '#768084',
+            implode('', $trackColorMarkup)
+        );
+
         $viewBox = implode(' ', array_map(
             [self::class, 'number'],
             [
@@ -370,14 +411,15 @@ final class LocalMapSvgRenderer
                     : ''
             ),
             $viewBox,
-            self::styles($viewport, $presentation['theme']),
+            self::styles($viewport, $presentation['theme'])
+                . '.path{stroke:url(#' . $trackPaintId . ')}',
             self::number($viewport['minimumX']),
             self::number($viewport['minimumY']),
             self::number($viewport['width']),
             self::number($viewport['height']),
             implode('', $zoneMarkup),
             implode('', $obstacleMarkup),
-            implode('', $pathMarkup),
+            $trackPaint . implode('', $pathMarkup),
             implode('', $diagnosticPointMarkup),
             $stationMarkup . $mowerMarkup . $mowerTimeMarkup,
             implode('', $labelMarkup),
@@ -792,7 +834,6 @@ final class LocalMapSvgRenderer
     {
         $span = max($viewport['width'], $viewport['height']);
         $stroke = max(0.18, $span / 280.0);
-        $path = max(0.28, $span / 180.0);
         $font = max(1.6, min(2.4, $span / 50.0));
 
         $palette = $theme === 'dark'
@@ -800,10 +841,7 @@ final class LocalMapSvgRenderer
                 'background' => '#171b1f',
                 'obstacleFill' => '#c1c9ce',
                 'obstacleStroke' => '#8e9aa2',
-                'pathAge0' => '#f2f5f4',
-                'pathAge1' => '#c4ccd1',
-                'pathAge2' => '#89959d',
-                'pathAge3' => '#505c64',
+                'path' => '#939a9d',
                 'pointStroke' => '#171b1f',
                 'label' => '#c7ced2',
                 'labelStroke' => '#171b1f',
@@ -816,10 +854,7 @@ final class LocalMapSvgRenderer
                 'background' => '#f8fafc',
                 'obstacleFill' => '#94a3b8',
                 'obstacleStroke' => '#64748b',
-                'pathAge0' => '#111827',
-                'pathAge1' => '#475569',
-                'pathAge2' => '#94a3b8',
-                'pathAge3' => '#cbd5e1',
+                'path' => '#768084',
                 'pointStroke' => '#ffffff',
                 'label' => '#374151',
                 'labelStroke' => '#ffffff',
@@ -831,7 +866,7 @@ final class LocalMapSvgRenderer
 
         $legendFont = self::number(max(1.35, min(1.9, $span / 58.0)));
         $strokeWidth = self::number($stroke);
-        $pathWidth = self::number($path);
+        $pathWidth = '2.3';
         $fontSize = self::number($font);
 
         return implode('', [
@@ -858,11 +893,8 @@ final class LocalMapSvgRenderer
                 $pathWidth
             ),
             sprintf(
-                '.path-age-0{stroke:%s}.path-age-1{stroke:%s}.path-age-2{stroke:%s}.path-age-3{stroke:%s}',
-                $palette['pathAge0'],
-                $palette['pathAge1'],
-                $palette['pathAge2'],
-                $palette['pathAge3']
+                '.legend-path{stroke:%s}.path-age-0{stroke-opacity:.35}.path-age-1{stroke-opacity:.33}.path-age-2{stroke-opacity:.31}.path-age-3{stroke-opacity:.30}',
+                $palette['path']
             ),
             sprintf(
                 '.path-point{stroke:%s;stroke-width:%s;vector-effect:non-scaling-stroke}',

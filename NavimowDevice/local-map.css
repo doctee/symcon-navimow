@@ -19,8 +19,6 @@ body {
     --nav-text: #f2f5f4;
     --nav-accent: #55c1e7;
     --nav-statistics-height: 0px;
-    --nav-host-interaction-inset: 46px;
-    --nav-navigation-frame-lift: 3px;
     position: relative;
     width: 100%;
     height: 100%;
@@ -88,15 +86,12 @@ body {
 }
 
 .nav-map__navigation {
-    top: calc(
-        var(--nav-host-interaction-inset)
-        - var(--nav-navigation-frame-lift)
-    );
-    left: 4px;
+    top: 6px;
+    left: 16px;
     right: auto;
     display: grid;
     grid-template-columns: 28px 28px 36px 50px;
-    max-width: calc(100% - 8px);
+    max-width: calc(100% - 32px);
     gap: 2px;
     padding: 2px 3px;
     border-radius: 6px;
@@ -268,6 +263,7 @@ body {
     }
 
     .nav-map__status {
+        top: 50px;
         max-width: calc(100% - 12px);
     }
 }
@@ -287,12 +283,6 @@ body {
     .nav-map__navigation button {
         height: 30px;
         font-size: 12px;
-    }
-}
-
-@media (hover: hover) and (pointer: fine) {
-    .nav-map {
-        --nav-host-interaction-inset: 48px;
     }
 }
 

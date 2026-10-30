@@ -61,8 +61,8 @@
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/local-map.css",
             "target": "NavimowDevice/local-map.css",
-            "sha256": "5592e6603478e2343f54c8e0b486e944b7c6760f811ab2aef864e22b04874d9a",
-            "bytes": 6108
+            "sha256": "b9ecd49a041b334bb6931a67dd87ac135a30b89707efd08e0c1d51c21d81f6b2",
+            "bytes": 5846
         },
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/local-map.html",
@@ -145,8 +145,8 @@
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/LocalMapSvgRenderer.php",
             "target": "libs/Navimow/LocalMapSvgRenderer.php",
-            "sha256": "6b7d1f37285a53c6a35051ca8c658e3b755073a728b8f933e75fa37ee93ff55b",
-            "bytes": 43719
+            "sha256": "aa9ac4f956f55141fb2559a85cf32e338652a1e577a3454494ca4c231c0347fb",
+            "bytes": 45325
         },
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/MapGeometryReducer.php",
@@ -263,7 +263,7 @@
             "bytes": 3780
         }
     ],
-    "filesetSha256": "8ea920281a7e04377ff24666f3746083cbae876c2ee15bf655582139cef4a23a",
+    "filesetSha256": "6d6bc627d828e3415bb29271048d1994234f560ee22e642419b605944d096a97",
     "builderVersion": "1.0.0",
     "license": {
         "identifier": "PolyForm-Noncommercial-1.0.0",
