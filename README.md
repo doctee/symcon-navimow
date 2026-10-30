@@ -100,6 +100,13 @@ been observed, and the fresh REST-derived mower state is active. Older pass
 observations retain their date. Unknown geometric results remain explicitly
 unknown; pass area is not a substitute for geometric coverage or weekly area.
 
+Tracks use muted colors matched to the mapped surface beneath each line, with
+30-35% opacity and rounded, constant 2.3 px strokes. The neutral outside color
+does not imply zone ownership. Rendering does not smooth, interpolate or change
+recorded points, segment breaks or analytics. Diagnostic markers retain their
+semantic colors. The compact toolbar sits 6 px from the top and 16 px from the
+left; narrow-screen status notices appear below it.
+
 The geometric reducer accepts MQTT location segments with code 4, supported by
 the same-session Running/Docking/Docked correlation in case-study step 90.
 This is diagnostic mowing evidence, not a blade-state measurement or a complete
