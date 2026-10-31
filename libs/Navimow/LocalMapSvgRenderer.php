@@ -300,6 +300,43 @@ final class LocalMapSvgRenderer
             }
         }
 
+        // Historical tracks must never move the current mower marker backwards.
+        if (isset($scene['positionPath'])) {
+            $latest = null;
+            $previousLatest = null;
+            $latestReceivedAt = null;
+            $positionSegments = $scene['positionPath']['segments'] ?? null;
+            if (!is_array($positionSegments) || count($positionSegments) > self::MAX_SEGMENTS) {
+                throw new InvalidArgumentException('Position path is invalid.');
+            }
+            $positionCount = 0;
+            foreach ($positionSegments as $segment) {
+                foreach ($segment['points'] as $point) {
+                    if (++$positionCount > self::MAX_POINTS) {
+                        throw new InvalidArgumentException('Position path exceeds limit.');
+                    }
+                    $receivedAt = $point['receivedAt'] ?? null;
+                    if (!is_int($receivedAt) || $receivedAt <= 0) {
+                        throw new InvalidArgumentException('Position timestamp is invalid.');
+                    }
+                    if ($latestReceivedAt !== null && $receivedAt <= $latestReceivedAt) {
+                        continue;
+                    }
+                    $next = [self::finite($point['localX'] ?? null), self::finite($point['localY'] ?? null)];
+                    if ($latest !== null && $latest !== $next) {
+                        $previousLatest = $latest;
+                    }
+                    $latest = $next;
+                    $latestReceivedAt = $receivedAt;
+                }
+            }
+        }
+        $history = $scene['path']['displayHistory'] ?? null;
+        if (is_array($history) && is_int($history['observedAt'] ?? null)) {
+            $presentation['trackObservedAt'] = max(0, $history['observedAt']);
+            $presentation['trackTruncated'] = ($history['truncated'] ?? false) === true;
+        }
+
         $stationMarkup = '';
         if (($scene['station'] ?? null) !== null) {
             if (!is_array($scene['station'])) {
@@ -561,7 +598,7 @@ final class LocalMapSvgRenderer
 
     /**
      * @param array<string, float> $viewport
-     * @param array{hiddenZoneSequences: list<int>, stationState: string, mowerState: string, showMower: bool, positionFreshness: string, theme: string} $presentation
+     * @param array{hiddenZoneSequences: list<int>, stationState: string, mowerState: string, showMower: bool, positionFreshness: string, theme: string, trackObservedAt?: int, trackTruncated?: bool} $presentation
      */
     private static function legendMarkup(
         array $viewport,
@@ -714,7 +751,14 @@ final class LocalMapSvgRenderer
                 self::number($rowY(7))
             );
         }
-        $markup .= $text($rowY(7), 'Fahrspur');
+        $trackLabel = 'Fahrspur';
+        if (($presentation['trackObservedAt'] ?? 0) > 0) {
+            $trackLabel .= ' ' . date('d.m.', $presentation['trackObservedAt']);
+            if ($presentation['trackTruncated'] ?? false) {
+                $trackLabel .= ' *';
+            }
+        }
+        $markup .= $text($rowY(7), $trackLabel);
         $markup .= sprintf(
             '<rect class="legend-obstacle" x="%s" y="%s" width="%s" height="%s" rx=".25"/>%s',
             self::number($iconX - $font * 0.75),

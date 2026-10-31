@@ -10,6 +10,34 @@ REST API. It is not an official Segway Navimow product.
 
 ## Scope
 
+### Retained display tracks
+
+The map keeps a separate, revision-bound display history. Midnight and the
+rolling telemetry retention window do not erase the last drawable track.
+Confirmed docking freezes it; a subsequent fresh Running observation starts
+a new display run, but a single point does not replace the previous track.
+The legend dates the last recorded edge. An asterisk marks a known bounded
+history truncation; the display is not proof of a complete mowing run.
+
+Display storage reuses the bounded track store (64 segments, 2048 points and
+512 KiB per working/protected copy; combined envelope at most 1100 KiB).
+There is no unbounded archive, fabricated connection across gaps or reuse
+across accepted geometry revisions. Already evicted paths cannot be recovered.
+The new attribute is additive; existing telemetry and analytics state are not
+migrated, cleared or filtered. The mower marker uses the current position
+path, independently of the protected display.
+
+This is deliberately not a standstill detector. Stationary samples, pauses,
+fault states and unknown states remain in the original bounded telemetry and
+analytics pipeline. Only confirmed docking has special display semantics;
+fault/pause/unknown REST states do not end a display run. A future stuck-mower
+detector must consume fresh observations before display filtering, retain
+bounded episode evidence (first/last observation, gaps, state/error changes),
+and distinguish physical standstill from missing telemetry, docking, pauses
+and position jitter. Repeated identical samples are useful timing evidence;
+silence after power saving is not proof of continuous standstill. No alert,
+automatic recovery, mower action or sleep-prevention behavior is enabled here.
+
 Implemented:
 
 - account, configurator and device instances;

@@ -16,6 +16,7 @@ require_once __DIR__ . '/../libs/Navimow/MqttPathSegmenter.php';
 require_once __DIR__ . '/../libs/Navimow/ZoneStatisticsReducer.php';
 require_once __DIR__ . '/../libs/Navimow/LocalMapSceneProjector.php';
 require_once __DIR__ . '/../libs/Navimow/RevisionBoundedTrackStore.php';
+require_once __DIR__ . '/../libs/Navimow/RetainedMapPath.php';
 require_once __DIR__ . '/../libs/Navimow/LocalMapSvgRenderer.php';
 require_once __DIR__ . '/../libs/Navimow/MowingAnalyticsReducer.php';
 
@@ -95,6 +96,7 @@ class NavimowDevice extends IPSModule
         $this->RegisterAttributeInteger('CommandKind', 0);
         $this->RegisterAttributeString('LocalMapRevisionRegistry', '{}');
         $this->RegisterAttributeString('LocalMapTrackState', '{}');
+        $this->RegisterAttributeString('LocalMapDisplayTrackState', '{}');
         $this->RegisterAttributeString('LocalMapStatisticsState', '{}');
         $this->RegisterAttributeString('LocalMapStatisticsGeometryKey', '');
         $this->RegisterAttributeString('LocalMapRenderMetadata', '{}');
@@ -371,6 +373,8 @@ class NavimowDevice extends IPSModule
             $scene['analytics'] = $analytics;
             $visualizationStatistics =
                 $this->localMapVisualizationStatistics($scene, $analytics);
+            $scene['positionPath'] = $scene['path'];
+            $scene['path'] = $this->retainedDisplayPath($scene);
             $svg = Navimow\LocalMapSvgRenderer::render($scene, [
                 'stationState' => $this->localMapStationState(),
                 'mowerState' => $this->localMapMowerState(),
@@ -1836,6 +1840,7 @@ class NavimowDevice extends IPSModule
         $scene['analytics'] = $analytics;
         $visualizationStatistics =
             $this->localMapVisualizationStatistics($scene, $analytics);
+        $scene['path'] = $this->retainedDisplayPath($scene);
 
         return [
             'svg' => Navimow\LocalMapSvgRenderer::render($scene, [
@@ -1852,6 +1857,37 @@ class NavimowDevice extends IPSModule
             'analytics' => $analytics,
             'visualizationStatistics' => $visualizationStatistics,
         ];
+    }
+
+    /**
+     * @param array<string, mixed> $scene
+     * @return array<string, mixed>
+     */
+    private function retainedDisplayPath(array $scene): array
+    {
+        $now = $this->currentTimestamp();
+        $updated = $this->GetValue('LastStatusUpdate');
+        $vehicleState = $this->GetValue('VehicleState');
+        $freshState = is_int($updated) && $updated > 0
+            && $updated <= $now && $now - $updated <= self::LOCAL_MAP_REST_STALE_SECONDS
+            && $this->GetValue('Online') === true && is_int($vehicleState)
+                ? $vehicleState : null;
+        $state = Navimow\RetainedMapPath::observe(
+            Navimow\RetainedMapPath::restore(
+                $this->ReadAttributeString('LocalMapDisplayTrackState')
+            ),
+            $scene,
+            $freshState,
+            $now
+        );
+        $this->WriteAttributeString(
+            'LocalMapDisplayTrackState',
+            Navimow\RetainedMapPath::serialize($state)
+        );
+        return Navimow\RetainedMapPath::path(
+            $state,
+            $scene['revision']['geometryKey']
+        );
     }
 
     /** @return array<string, mixed> */
