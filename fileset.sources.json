@@ -91,8 +91,8 @@
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/module.php",
             "target": "NavimowDevice/module.php",
-            "sha256": "52e6b57ba8343276420cd2d3052b3f68385e636fe6b4f81355beec69a7e0664d",
-            "bytes": 79016
+            "sha256": "8a1318529cfd3ece953172b20e421dc1859966d864727bdb58424960a8f77e62",
+            "bytes": 80440
         },
         {
             "source": "case-studies/navimow/distribution/NavimowMqttReceiver/form.json",
@@ -145,8 +145,8 @@
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/LocalMapSvgRenderer.php",
             "target": "libs/Navimow/LocalMapSvgRenderer.php",
-            "sha256": "aa9ac4f956f55141fb2559a85cf32e338652a1e577a3454494ca4c231c0347fb",
-            "bytes": 45325
+            "sha256": "5a47c85e01ea53be3a6ae7b8039011badf1d9d0a51fc906e87bf3b0b3f1c726a",
+            "bytes": 47573
         },
         {
             "source": "case-studies/navimow/distribution/libs/Navimow/MapGeometryReducer.php",
@@ -245,6 +245,12 @@
             "bytes": 4357
         },
         {
+            "source": "case-studies/navimow/distribution/libs/Navimow/RetainedMapPath.php",
+            "target": "libs/Navimow/RetainedMapPath.php",
+            "sha256": "b86892fcb72b4efaaf8fc72653c697760139f58824ff9f8235babfb0081b463b",
+            "bytes": 7342
+        },
+        {
             "source": "case-studies/navimow/distribution/libs/Navimow/RevisionBoundedTrackStore.php",
             "target": "libs/Navimow/RevisionBoundedTrackStore.php",
             "sha256": "9c276b508e2f7b0c79d549722ee38d3f4973610eff075e95e98b3a56e96d57f9",
@@ -263,7 +269,7 @@
             "bytes": 3780
         }
     ],
-    "filesetSha256": "6d6bc627d828e3415bb29271048d1994234f560ee22e642419b605944d096a97",
+    "filesetSha256": "bbad7b56217c13a65fa53e8ba5f763504c5861f3349b7189d2cff99e1a950ee8",
     "builderVersion": "1.0.0",
     "license": {
         "identifier": "PolyForm-Noncommercial-1.0.0",
