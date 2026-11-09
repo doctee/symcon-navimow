@@ -31,6 +31,7 @@ class NavimowDevice extends IPSModule
     private const VEHICLE_STATE_DOCKING = 5;
     private const VEHICLE_STATE_OFFLINE = 11;
     private const MAX_DEBUG_JSON_BYTES = 16384;
+    private const POLL_PROTOCOL_LOG_INTERVAL_SECONDS = 300;
     private const COMMAND_DOCK = 6;
     private const COMMAND_PAUSE = 4;
     private const COMMAND_RESUME = 5;
@@ -94,6 +95,7 @@ class NavimowDevice extends IPSModule
         $this->RegisterAttributeInteger('CommandDeadline', 0);
         $this->RegisterAttributeInteger('CommandVerificationState', self::COMMAND_STATE_IDLE);
         $this->RegisterAttributeInteger('CommandKind', 0);
+        $this->RegisterAttributeInteger('PollProtocolLastLog', 0);
         $this->RegisterAttributeString('LocalMapRevisionRegistry', '{}');
         $this->RegisterAttributeString('LocalMapTrackState', '{}');
         $this->RegisterAttributeString('LocalMapDisplayTrackState', '{}');
@@ -134,6 +136,7 @@ class NavimowDevice extends IPSModule
         $this->RegisterVariableBoolean('Online', 'Online', '', 20);
         $this->RegisterVariableInteger('BatteryLevel', 'Battery Level', '~Intensity.100', 30);
         $this->RegisterVariableInteger('LastStatusUpdate', 'Last Status Update', '~UnixTimestamp', 40);
+        $this->RegisterVariableString('StatusRefreshError', 'Status Refresh Error', '', 45);
         $this->RegisterVariableInteger('LastCommand', 'Last Command', 'NAVIMOW.Command', 50);
         $this->RegisterVariableInteger('LastCommandAt', 'Last Command At', '~UnixTimestamp', 60);
         $this->RegisterVariableInteger('LastCommandResult', 'Last Command Result', 'NAVIMOW.CommandResult', 70);
@@ -575,7 +578,6 @@ class NavimowDevice extends IPSModule
             if (
                 is_array($message)
                 && ($message['DataID'] ?? null) === self::DATA_INTERFACE
-                && ($message['SchemaVersion'] ?? null) === self::MESSAGE_SCHEMA_VERSION
                 && ($message['Function'] ?? null) === 'PollStatus'
             ) {
                 $targetDeviceId = $message['DeviceId'] ?? null;
@@ -591,6 +593,10 @@ class NavimowDevice extends IPSModule
                 ) {
                     return;
                 }
+                if (($message['SchemaVersion'] ?? null) !== self::MESSAGE_SCHEMA_VERSION) {
+                    $this->rejectPollStatusSchema();
+                    return;
+                }
                 $this->RefreshStatus();
             }
         } catch (Throwable $exception) {
@@ -599,6 +605,28 @@ class NavimowDevice extends IPSModule
                 $this->limitMessage($exception->getMessage()),
                 0
             );
+        }
+    }
+
+    private function rejectPollStatusSchema(): void
+    {
+        $lock = 'NAVIMOW_POLL_PROTOCOL_' . $this->InstanceID;
+        if (!IPS_SemaphoreEnter($lock, 0)) {
+            return;
+        }
+        try {
+            $message = 'Incompatible PollStatus schema; status refresh skipped.';
+            if ($this->GetValue('StatusRefreshError') !== $message) {
+                $this->SetValue('StatusRefreshError', $message);
+            }
+            $now = $this->currentTimestamp();
+            $lastLog = $this->ReadAttributeInteger('PollProtocolLastLog');
+            if ($lastLog <= 0 || $now < $lastLog || $now - $lastLog >= self::POLL_PROTOCOL_LOG_INTERVAL_SECONDS) {
+                $this->WriteAttributeInteger('PollProtocolLastLog', $now);
+                IPS_LogMessage('Navimow Device ' . $this->InstanceID, $message);
+            }
+        } finally {
+            IPS_SemaphoreLeave($lock);
         }
     }
 
@@ -942,6 +970,9 @@ class NavimowDevice extends IPSModule
 
         $this->SetValue('Online', $online);
         $this->SetValue('LastStatusUpdate', $receivedAt);
+        if ($this->GetValue('StatusRefreshError') !== '') {
+            $this->SetValue('StatusRefreshError', '');
+        }
 
         if (
             $this->ReadPropertyBoolean('DebugPayloads')
