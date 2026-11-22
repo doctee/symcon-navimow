@@ -7,8 +7,8 @@
         {
             "source": "case-studies/navimow/distribution/NavimowAccount/form.json",
             "target": "NavimowAccount/form.json",
-            "sha256": "70e1f7b466f5ca0d6d74cf62a2b1bd32efe068b784770fc44f9c73993bd7ba04",
-            "bytes": 4819
+            "sha256": "59fc964c08d0a7959a0febcf5964379d09d9788f7719eb1f5d0c71223568f5f9",
+            "bytes": 4957
         },
         {
             "source": "case-studies/navimow/distribution/NavimowAccount/locale.json",
@@ -25,8 +25,8 @@
         {
             "source": "case-studies/navimow/distribution/NavimowAccount/module.php",
             "target": "NavimowAccount/module.php",
-            "sha256": "bdcef46e57fbe153ccb24b16c45af8f815cdd54aca0b133389bb5378dc28f024",
-            "bytes": 316566
+            "sha256": "8987fbf42dbdc38bc45ccb035a56b166cb3d60b815aef1a99d1b18dc95b31069",
+            "bytes": 318133
         },
         {
             "source": "case-studies/navimow/distribution/NavimowConfigurator/form.json",
@@ -55,8 +55,8 @@
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/form.json",
             "target": "NavimowDevice/form.json",
-            "sha256": "e63e53b06733264fa970bfc611b1aff0c2b7943d12b25243b05b95b90b57026b",
-            "bytes": 4213
+            "sha256": "1c2792b50c24e100dd9a0d40a77ba3def05fd7f5363b70652b58e65c7014af93",
+            "bytes": 4351
         },
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/local-map.css",
@@ -73,8 +73,8 @@
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/local-map.js",
             "target": "NavimowDevice/local-map.js",
-            "sha256": "2c7038355f46dd599359af35485ef8090f19bacd31d5d482fc9c30cb7950f63e",
-            "bytes": 20861
+            "sha256": "88ee238cb742308ec5414839b40fb2f32e9fee8fe3bd33c1e80cef782fa11c59",
+            "bytes": 22024
         },
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/locale.json",
@@ -91,8 +91,8 @@
         {
             "source": "case-studies/navimow/distribution/NavimowDevice/module.php",
             "target": "NavimowDevice/module.php",
-            "sha256": "182494c136e438379a98d03716f9d40ec792445ddb372540f65c33d53b1178b4",
-            "bytes": 81810
+            "sha256": "ad9814e6af216ef066505e4a9bb56dbbd23f33c2af615d9a84a553d6739acd7e",
+            "bytes": 84701
         },
         {
             "source": "case-studies/navimow/distribution/NavimowMqttReceiver/form.json",
@@ -257,6 +257,12 @@
             "bytes": 25780
         },
         {
+            "source": "case-studies/navimow/distribution/libs/Navimow/SeasonState.php",
+            "target": "libs/Navimow/SeasonState.php",
+            "sha256": "5b5c35399838d24f7022c46729604ab51f8b6e374a3d5ccc56fd984dac219d9f",
+            "bytes": 3261
+        },
+        {
             "source": "case-studies/navimow/distribution/libs/Navimow/ZoneStatisticsReducer.php",
             "target": "libs/Navimow/ZoneStatisticsReducer.php",
             "sha256": "33296eeafbeb2cfb88a42736cfb1ad4e3c1185d932f55ab2b07c71176ea0ca8a",
@@ -269,7 +275,7 @@
             "bytes": 3780
         }
     ],
-    "filesetSha256": "f8bfefe226916fe916a951d22ae23f6616f4d6405895e9aca9b80b58ec696b4a",
+    "filesetSha256": "5c051fa8b62b4591139074b65a74d346a3f3e0b045020e89dd1602baead2085e",
     "builderVersion": "1.0.0",
     "license": {
         "identifier": "PolyForm-Noncommercial-1.0.0",

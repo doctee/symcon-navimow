@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../libs/Navimow/ApiClient.php';
+require_once __DIR__ . '/../libs/Navimow/SeasonState.php';
 require_once __DIR__ . '/../libs/Navimow/CommandContract.php';
 require_once __DIR__ . '/../libs/Navimow/MqttEnvelopeException.php';
 require_once __DIR__ . '/../libs/Navimow/MqttEnvelopeParser.php';
@@ -133,6 +134,7 @@ class NavimowAccount extends IPSModule
         $this->RegisterPropertyString('ClientSecret', '');
         $this->RegisterPropertyString('RedirectUri', 'http://localhost:1/callback');
         $this->RegisterPropertyInteger('PollInterval', 300);
+        $this->RegisterPropertyString('SeasonStateVariable', '');
         $this->RegisterPropertyInteger('ActivePollInterval', 60);
         $this->RegisterPropertyBoolean('DebugPayloads', false);
         $this->RegisterPropertyBoolean('EnableMqttShadow', false);
@@ -519,6 +521,14 @@ class NavimowAccount extends IPSModule
 
     public function PollReadOnlyStatus(): void
     {
+        if (
+            !Navimow\SeasonState::allowsRead(Navimow\SeasonState::read(
+                $this->ReadPropertyString('SeasonStateVariable')
+            ))
+        ) {
+            $this->SetTimerInterval('PollStatus', 0);
+            return;
+        }
         if (!$this->hasUsableAccessToken()) {
             $this->SetTimerInterval('PollStatus', 0);
             $this->clearAdaptivePollingState();
@@ -538,6 +548,11 @@ class NavimowAccount extends IPSModule
 
     public function WakePolling(): string
     {
+        $season = Navimow\SeasonState::read($this->ReadPropertyString('SeasonStateVariable'));
+        if (!Navimow\SeasonState::allowsRead($season)) {
+            $this->SetTimerInterval('PollStatus', 0);
+            return Navimow\SeasonState::label($season);
+        }
         if (!$this->hasUsableAccessToken()) {
             $this->SetTimerInterval('PollStatus', 0);
             $this->clearAdaptivePollingState();
@@ -2195,6 +2210,14 @@ class NavimowAccount extends IPSModule
 
     private function schedulePolling(): void
     {
+        if (
+            !Navimow\SeasonState::allowsRead(Navimow\SeasonState::read(
+                $this->ReadPropertyString('SeasonStateVariable')
+            ))
+        ) {
+            $this->SetTimerInterval('PollStatus', 0);
+            return;
+        }
         if (!$this->hasUsableAccessToken()) {
             $this->SetTimerInterval('PollStatus', 0);
             return;
@@ -2243,6 +2266,11 @@ class NavimowAccount extends IPSModule
 
     private function performStatus(string $deviceId): array
     {
+        $season = Navimow\SeasonState::read($this->ReadPropertyString('SeasonStateVariable'));
+        if (!Navimow\SeasonState::allowsRead($season)) {
+            return ['status' => 'error', 'kind' => 'season',
+                'message' => Navimow\SeasonState::label($season), 'staleAfter' => $this->staleAfterSeconds()];
+        }
         return $this->withAccountLock(function () use ($deviceId): array {
             $response = $this->createApiClient()->getVehicleStatus(
                 $this->requireAccessToken(),
@@ -2294,6 +2322,11 @@ class NavimowAccount extends IPSModule
             $deviceId,
             $payload
         ): array {
+            $season = Navimow\SeasonState::read($this->ReadPropertyString('SeasonStateVariable'));
+            if (!Navimow\SeasonState::allowsCommands($season)) {
+                return ['status' => 'error', 'kind' => 'season',
+                    'message' => Navimow\SeasonState::label($season)];
+            }
             $response = $this->createApiClient()->sendCommands(
                 $this->requireAccessToken(),
                 $payload

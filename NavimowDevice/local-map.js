@@ -287,7 +287,8 @@
         state.detailsZoneId = String(zone.zoneId);
         detailsTitle.textContent = entry.label;
         const rows = [
-            ['Status', zone.passIsCurrent === true ? 'Aktueller Mählauf' : 'Zuletzt erfasster Stand'],
+            ['Status', root.dataset.season === 'paused' ? 'Historischer Stand vor der Pause'
+                : (zone.passIsCurrent === true ? 'Aktueller Mählauf' : 'Zuletzt erfasster Stand')],
             ['Beobachtet', Number.isFinite(zone.passObservedAt)
                 ? new Date(zone.passObservedAt * 1000).toLocaleString('de-DE') : 'Nicht ermittelbar'],
             ['Passfortschritt · gemeldet', Number.isFinite(zone.passProgressPercent)
@@ -295,7 +296,8 @@
             ['Passfläche · gemeldet', detailsArea(zone.observedArea)],
             ['Abdeckung · geschätzt', Number.isFinite(zone.passCoveragePercent)
                 ? '≈ ' + formatPercent(zone.passCoveragePercent) : 'Nicht ermittelbar'],
-            ['Mähfläche Woche · geschätzt', Number.isFinite(zone.weekEstimatedArea)
+            [root.dataset.season === 'paused' ? 'Woche des gespeicherten Stands · geschätzt'
+                : 'Mähfläche Woche · geschätzt', Number.isFinite(zone.weekEstimatedArea)
                 ? '≈ ' + detailsArea(zone.weekEstimatedArea) : 'Nicht ermittelbar'],
         ];
         detailsValues.replaceChildren();
@@ -415,9 +417,27 @@
                     : [])
         );
         root.dataset.theme = payload.theme === 'light' ? 'light' : 'dark';
+        const winter = payload.season && (payload.season.mode !== 'season' || !payload.season.applied);
+        root.dataset.season = winter ? 'paused' : 'season';
+        root.querySelector('[data-follow]').disabled = Boolean(winter);
+        if (winter) {
+            state.following = false;
+            stage.querySelectorAll('.mower, .mower-time-label').forEach(function (element) {
+                element.style.display = 'none';
+            });
+            renderStatistics((payload.statistics || []).map(function (zone) {
+                return Object.assign({}, zone, {passIsCurrent: false, recencyState: 0});
+            }));
+            statistics.querySelectorAll('.nav-map__status-line:last-child').forEach(function (line) {
+                line.textContent = payload.season.mode === 'winter' ? 'Winterpause' : 'Betrieb pausiert';
+            });
+        }
         status.textContent = payload.status === 'stale'
             ? 'Position veraltet'
             : '';
+        if (winter) {
+            status.textContent = payload.seasonLabel || 'Winterpause';
+        }
         if (state.following) {
             focusMower();
         }
